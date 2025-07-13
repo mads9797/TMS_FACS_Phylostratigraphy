@@ -78,7 +78,6 @@ You can use the pre-built image from Docker Hub:[madihakhan/tsm_pheno_analysis](
 - Password: `yourpassword` (from step 2)
 
 
-
 ## Running the Analysis
 
 1. **Clone this repository:**
@@ -93,8 +92,9 @@ You can use the pre-built image from Docker Hub:[madihakhan/tsm_pheno_analysis](
 3. **Run the main script in RStudio (after following bash steps):**
 
     ```r
-    source("scripts/TMS_FACS_Phylostrata_analysis.R")
+    source("scripts/run_pipeline.sh.Rmd)
     ```
+
 ### Author
 
 Madiha Khan  
