@@ -6,6 +6,7 @@ This repository contains the full workflow and codebase for analysing age-relate
 ## Project Overview
 
 This project investigates how genes of different evolutionary ages are differentially expressed during ageing in mice. Using phylostratigraphy, single-cell transcriptomics, and differential expression analysis, it explores tissue-specific transcriptional trends between 3-month-old (young adult) and 24-month-old (aged) mice.
+This project was conducted as part of my MSc Bioinformatics dissertation at King's College London (2025).
 
 ## Data Sources
 
