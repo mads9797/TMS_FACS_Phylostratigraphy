@@ -1,0 +1,2358 @@
+---
+title: "run_pipeline.sh"
+output: html_document
+date: "2025-07-13"
+---
+
+Part 1: Making environment + setting up working directory 
+```{bash}
+#Step 1: #Make new working directory for this project 
+mkdir TMS_phylo
+
+```
+
+```{bash}
+#Step 2: Using docker image to create a reproducible environment 
+
+#See docker in order to gain access to the tar file
+
+
+
+
+
+
+
+#Use the srun command to request an interactive shell on a compute node from the msc_appbio partition.
+#This is necessary for building Singularity containers, as the process requires more compute power and memory than a login node can provide.
+srun -p msc_appbio --pty /bin/bash
+
+
+#Build docker image: by telling Singularity (a container platform) to create a new container image.
+#specifiy name of output .sif file name (which contains the final container) 
+#specify the input source being the docker image in the .tar archive format to be converted into .sif file
+singularity build r+rstudio_environment_4.3.3.sif docker-archive://r+rstudio_environment_4.3.3.tar
+
+```
+
+```{bash}
+#Step 3: Launching RStudio Server in a Singularity Container via SLURM
+
+#Navigate to your designated project folder
+cd TMS_phylo
+
+#Create a Bash script to automate the launch of RStudio Server within a container
+nano launch_rstudio_container.sh
+
+
+###Paste the following into the Bash script, this will launch an RStudio Server session within a Singularity container on HPC cluster using SLURM job scheduling = reproducible R environment 
+
+#!/bin/bash -l
+
+#SBATCH --job-name=launch_rstudio_container
+#SBATCH --partition=msc_appbio
+#SBATCH --ntasks=1
+#SBATCH --signal=USR2
+#SBATCH --cpus-per-task=6
+#SBATCH --mem-per-cpu=2GB
+#SBATCH --time=04:00:00
+
+# Set your container path
+CONTAINER="/scratch/prj/bmb_phyl_chron_disease/madiha_proj/TMS_phylo/r+rstudio_environment_4.3.3.sif"
+
+# Verify container exists
+if [ ! -f "$CONTAINER" ]; then
+    echo "Error: Container not found at $CONTAINER" >&2
+    exit 1
+fi
+
+# Get connection info/ Generate random password and port used to securely access the RStudio Server.
+export PASSWORD=$(openssl rand -base64 15)
+PORT=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+
+cat 1>&2 <<END
+1. SSH tunnel from your workstation:
+   ssh -i~/.ssh/panda -NL 8787:${HOSTNAME}:${PORT} ${USER}@hpc.create.kcl.ac.uk
+
+2. Connect to: http://localhost:8787
+   Username: ${USER}
+   Password: ${PASSWORD}
+END
+
+# Create temp directory in your scratch space
+LOCAL_TMP="/scratch/users/k24090847/rstudio_temp_${SLURM_JOB_ID}"
+mkdir -p "${LOCAL_TMP}"/{var-rstudio-server,data-rstudio-server} || {
+    echo "Error: Failed to create temp directory at ${LOCAL_TMP}" >&2
+    exit 1
+}
+
+# Launch RStudio  inside Singularity container
+singularity exec \
+  -B "${LOCAL_TMP}:/tmp/rstudio-tmp" \
+  -B "${HOME}" \
+  -B "/scratch/users/k24090847" \
+  --env "TMPDIR=/tmp/rstudio-tmp" \
+  --env "PASSWORD=${PASSWORD}" \
+  "$CONTAINER" \
+  bash -c "
+    echo 'directory=/tmp/rstudio-tmp/var-rstudio-server' > /tmp/rstudio-tmp/database.conf
+    rserver \
+      --server-user ${USER} \
+      --www-port ${PORT} \
+      --server-data-dir /tmp/rstudio-tmp/data-rstudio-server \
+      --secure-cookie-key-file /tmp/rstudio-tmp/data-rstudio-server/secure-cookie-key \
+      --database-config-file=/tmp/rstudio-tmp/database.conf \
+      --auth-none=0 \
+      --auth-pam-helper-path=pam-helper
+  " || {
+    echo "RStudio Server failed with status $?" >&2
+  }
+
+# Cleanup (only if successful)
+[ $? -eq 0 ] && rm -rf "${LOCAL_TMP}"
+
+
+
+
+
+#Submit job to SLURM
+sbatch launch_rstudio_container.sh
+
+#Check the status of your submitted job
+squeue --me 
+
+#Once your job starts, SLURM generates an output file (e.g., slurm-26876627.out). Access job output using:
+ls
+
+#This file contains your RStudio connection instructions, including: SSH tunnel command + Local browser address + Username and password
+#View file contents + follow the printed steps to connect securely to the RStudio Server session running on the cluster.
+less slurm-26876627.out 
+
+```
+
+Part 2: Data Acquisition
+
+```{bash}
+## STEP 4: Data Acquisition: Download TMS FACS Data
+#This project will utilise the **FACS (Fluorescence-Activated Cell Sorting)** dataset rather than the 10X Chromium dataset provided by the **Tabula Muris Senis (TMS)** consortium. FACS offers **higher resolution, greater depth**, and **more precise cell-type annotation**, making it the better choice for exploring how **gene expression and gene age interact in the context of ageing**.
+
+### Download both files to perform a meaningful analysis:
+#exprMatrix.tsv.gz: compressed gene expression matrix with counts for each gene across individual cells.
+#metadata file: that provides biological context for each cell (e.g., tissue type, age, sex, and cell type). Expression values are meaningless without metadata context, and metadata is useless without corresponding gene expression data.
+
+
+#Download files and keep originals in this area 
+cd /scratch/prj/bmb_phyl_chron_disease/madiha_proj/TMS_phylo
+
+# Download expression matrix (compressed) file containing gene expression counts.
+wget https://cells.ucsc.edu/tabula-muris-senis/facs/all/exprMatrix.tsv.gz
+
+# Download metadata file (annotations for each cell: tissue, age, cell type, etc.)
+wget https://cells.ucsc.edu/tabula-muris-senis/facs/all/meta.tsv
+
+#Copy of files will be moved into working directory where I have write permissions (REST of files in this project will be stored in the project working directory = /scratch/prj/bmb_phyl_chron_disease/madiha_proj/TMS_phylo)
+cp exprMatrix.tsv.gz gene_phylostrata.csv meta.tsv /users/k24090847/
+
+```
+
+
+
+```{r}
+#STEP 1: Initial Setup and Library Loading
+
+#Define working directory
+setwd("/scratch/prj/bmb_phyl_chron_disease/madiha_proj/TMS_phylo")
+#Confirm the current working directory
+getwd()
+
+#Check disk usage
+system("df -h")
+#List directories in the scratch space (confirm access to the scratch directory = useful when working in an HPC environment)
+system("ls /scratch")
+
+#Containerised HPC environments:.libPaths() ensures R knows where to find or install packages. Especially useful when default library paths inside the singularity container are read-only for non root users. 
+.libPaths("/scratch/prj/bmb_phyl_chron_disease/madiha_proj/Rstudio")
+.libPaths()
+
+#Core data handling & utilities
+library(BiocManager)      # Manages Bioconductor package installation
+library(Matrix)           # Efficient handling of sparse and dense matrices
+library(dplyr)            # Data wrangling and manipulation
+library(R.utils)          # File handling, compression, and miscellaneous tools
+library(data.table)       # High-performance data frame handling
+library(readr)            # Fast reading of flat files (CSV, TSV, etc.)
+library(tidyr)            # Data tidying (e.g., pivoting, unnesting)
+library(httr)             # Tools for working with URLs and web APIs
+library(jsonlite)         # Parsing and generating JSON (useful for APIs)
+library(Rcpp)             # Seamlessly integrates C++ code with R
+library(future)           # Parallelisation and async processing
+library(tibble)           # Tidyverse-compatible data frames
+library(stringr)          # String manipulation
+
+
+#Visualisation
+library(ggplot2)          # General-purpose plotting
+library(ggrepel)          # Improved text labels for ggplot2
+library(pheatmap)         # Heatmaps for expression patterns
+library(reshape2)         # Data reshaping
+library(patchwork)        # For vertical stacking of plots (plot rendering)
+
+#Genomic data access and annotation
+library(biomaRt)          # Interface to Ensembl via BioMart
+library(GenomeInfoDb)     # Chromosome and genome metadata
+
+#Single cell RNA-seq analysis
+library(Seurat)         # Main toolkit for scRNA-seq analysis
+library(SeuratObject)   # Underlying data structure for Seurat
+library(harmony)        # Batch effect correction and integration
+library(scDblFinder)    # Detecting and removing doublets in single-cell data
+library(MAST)           # Differential expression tailored for scRNA-seq
+
+#Functional Enrichment & Pathway Analysis
+library(clusterProfiler)  # GO/KEGG enrichment
+library(gprofiler2)       # Interface to g:Profiler
+library(org.Mm.eg.db)     # Mouse genome annotations
+library(AnnotationDbi)    # Annotation DB interface
+library(enrichplot)       # Visualisation of enrichment results
+```
+
+
+
+
+```{r}
+#STEP 2: Load files into R and prepare files for inspection 
+
+#Change working directory. Files will be downloaded into working directory where I have write permissions
+setwd("/users/k24090847/")
+getwd()
+
+# Load expression matrix using fread for fast and efficient reading of large .tsv.gz files
+expr_matrix <- fread("~/exprMatrix.tsv.gz")
+
+# Load cell metadata as a tab-delimited table, with cell barcodes as row names
+meta_data <- read.table("~/meta.tsv", header=T, sep="\t", as.is=T, row.names=1)
+
+# Extract gene names from the first column and clean them by removing any prefixes before the pipe symbol
+genes = expr_matrix[,1][[1]]
+genes = gsub(".+[|]", "", genes)
+
+# Reformat the expression matrix:
+# - Remove the original gene identifier column
+# - Assign cleaned gene symbols as row names
+expr_matrix = data.frame(expr_matrix[,-1], row.names=genes)
+```
+
+
+Part 3: Preprocessing 
+```{r}
+#STEP 3: Check for and deal with missingness: common quality control step in transcriptomic analysis.
+
+#Check for any NA values in the expression matrix
+sum(is.na(expr_matrix))  # Total number of missing values = 0 
+#View(expr_matrix)
+
+
+#Total number of missing values in the metadata
+sum(is.na(meta_data)) #1561
+#View(meta_data)
+
+
+#Count missing values per column in the metadata file 
+colSums(is.na(meta_data)) #Only one column, cell_ontology_id, contains missing data (1561 missing values). All other metadata columns appear to be complete. 
+
+#This could represent: Unannotated or ambiguous cells (e.g. doublets, low-quality) or Cell types not yet mapped to ontology terms or	Metadata loss during processing
+
+#cell_ontology_class or cell_ontology_id = can be used for Optional filtering or subsetting If you want to restrict analysis to specific cell types within a tissue therefore it is useful to 
+
+
+#Check % of missingness in the cell_ontology_id column 
+mean(is.na(meta_data$cell_ontology_id)) * 100 # = 1.915855%
+
+
+# Define common missing value strings
+missing_strings <- c("nan", "NA", "none", "null", "unknown", "")
+
+# Check which unique values in cell_ontology_id are in this list
+unique_vals <- unique(meta_data$cell_ontology_id)
+
+# Identify suspicious values in the column
+suspicious_vals <- unique_vals[unique_vals %in% missing_strings]
+
+#Print the suspicious values
+print(suspicious_vals) #nan represents missing data but not an actual R missing value (NA). 
+
+#Replace "nan" with NA so that missingness is correctly recognised and handled in R.
+meta_data$cell_ontology_id[meta_data$cell_ontology_id == "nan"] <- NA
+
+```
+
+#####Columns: batch/ age/ tissue/Expressed.Genes have NO missing values = which will be used for downstream analysis
+
+```{r}
+#STEP 4: Visualise the association between missing values in the cell_ontology_id field and other sample metadata attributes
+
+# Create a new column indicating whether the cell_ontology_id is missing or not 
+meta_data$missing_cell_ontology_id <- is.na(meta_data$cell_ontology_id)
+
+# Loop through metadata columns
+for (cat_var in c("batch", "age", "sex", "tissue", 
+                  "mouse.id", "subtissue", 
+                  "Louvain.Cluster", "leiden")) {
+  
+  # Create proportion plot
+  p <- ggplot(meta_data, aes_string(x = cat_var, fill = "missing_cell_ontology_id")) +
+    geom_bar(position = "fill") +
+    ylab("Proportion") +
+    ggtitle(paste("Missingness in cell_ontology_id by", cat_var)) +
+    scale_fill_manual(values = c("FALSE" = "yellowgreen", "TRUE" = "deeppink"),
+                      name = "Missing cell_ontology_id") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+    # Save as high-res TIFF
+    ggsave(filename = paste0("missingness_by_", cat_var, ".tiff"), plot = p,
+         device = "tiff", width = 8, height = 6, dpi = 600, compression = "lzw")
+  
+  print(p)
+  
+  # Calculate % missing per category
+  cat("\nMissingness summary for", cat_var, ":\n")
+  summary_df <- aggregate(missing_cell_ontology_id ~ get(cat_var), data = meta_data, FUN = mean)
+  colnames(summary_df) <- c(cat_var, "Proportion_Missing")
+  summary_df$Proportion_Missing <- round(summary_df$Proportion_Missing * 100, 2)
+  print(summary_df)
+}
+```
+###Summary of Missingness in cell_ontology_id
+
+Based on the missingness analysis and diagnostic plot inspection, the missing values in the cell_ontology_id column are not missing completely at random. Instead, they display clear, systematic patterns associated with specific metadata variables, suggesting a non-random mechanism underlying the missingness.
+
+#Missingness occurs in 100% of batch 0 and 2 and 2.4% in batch 1
+#Missingness occurs in 100% 18m,21m, 24m + 2.54% of 3m
+#Missingness occurs in more than 58.13% of males and 9.37% in females
+#Missingness occurs in all tissues: 
+#BAT 57.78 | Bladder 44.01 | Brain_Myeloid 51.12 | Brain_Non-Myeloid 37.92 | Diaphragm 45.90 | GAT 43.78 | Heart 44.73 | Kidney 62.93 | Large_Intestine 33.73 | Limb_Muscle 53.30 | Liver 57.47 | Lung 55.93 | Mammary_Gland 39.50 | Marrow 48.25 | MAT 41.22 | Pancreas 38.69 | SCAT 40.10 | Skin 33.39 | Spleen 39.65 | Thymus 48.69 | Tongue 48.99 | Trachea 42.63
+
+#Missingness occurs in mouse.id's: 18_46_F 100.00 | 18_47_F 100.00 | 21_48_F 100.00 | 21_54_F 100.00 | 21_55_F 100.00 | 24_58_M 100.00 | 24_59_M 100.00 | 24_60_M 100.00 | 24_61_M 100.00 | 3_10_M 2.22 | 3_10_M/3_11_M 19.05 | 3_11_M 2.45 | 3_38_F 2.42 | 3_38_F/3_39_F 18.67 | 3_39_F 2.16 | 3_56_F 2.92 | 3_57_F 0.00 | 3_8_M 2.32 | 3_9_M 3.43
+
+#Missingness occurs in all subtissues except the LA/RA: 
+#Anagen 28.48 | Aorta 50.06 | B-cells 44.90 | BAT 57.78 | Cerebellum 57.14 | Cortex 45.68 | Diaphragm 45.90 | Distal 36.34 | Endocrine 36.62 | Endomucin 68.89 | EPCAM 70.92 | Epithelium 78.42 | Exocrine 43.03 | Flowthrough 64.70 | ForelimbandHindlimb 53.30 | GAT 43.78 | Granulocytes 49.59 | Hepatocytes 46.47 | Hippocampus 43.30 | KLS 44.62 | LA 43.78 | LA/RA 0.00 | LV 51.83 | Mammary_Gland 39.50 | MAT 41.22 | nan 44.53 | Non-hepatocytes 63.74 | Proximal 32.12 | RA 44.32 | RV 39.95 | SCAT 40.10 | Striatum 40.64 | T-cells 55.82 | Telogen 1.04 | Unknown 24.76
+
+#Missingness occurs in all Louvain.Cluster
+#Missingness occurs in all leiden
+
+Missingness pattern would be classified as MAR (Missing At Random) or possibly MNAR (Missing Not At Random), but definitely not MCAR (Missing Completely At Random).
+Not MCAR: The missingness is clearly associated with observed metadata variables like batch, age, sex, tissue, mouse ID, and clusters. MCAR means missingness is completely independent of both observed and unobserved data, which is not the case here.
+
+	•	Not MCAR: The missingness is clearly associated with observed metadata variables like batch, age, sex, tissue, mouse ID, and clusters. MCAR means missingness is completely independent of both observed and unobserved data, which is not the case here.
+	
+	•	Likely MAR: Since missingness is related to observed variables (e.g., batch, tissue, age), but you haven’t indicated it depends on the missing values themselves, this fits the MAR assumption — missingness depends on observed data but not on the missing values themselves.
+	
+	•	Possible MNAR: If the missingness depends on unobserved or missing values themselves (for example, if certain cell_ontology_id values are systematically missing because of their own inherent properties), then it would be MNAR. But structured missingness is explained by known variables, so MAR is more likely.
+
+
+
+```{r}
+#STEP 5b: Check for missing values in all columns of meta_data after replacing "nan" with NA
+
+sum(is.na(meta_data$cell_ontology_id)) #36,699 missing values (this has increased from the original 1561)
+
+# Calculate the percentage of missing values for each column
+missing_percent <- colSums(is.na(meta_data)) / nrow(meta_data) * 100
+
+# Filter to show only columns with any missing values
+missing_percent[missing_percent > 0]
+
+# Sort in descending order
+sort(missing_percent, decreasing = TRUE)
+
+```
+#Missingness is as follows in each column
+plate 56.39%
+cell_ontology_id 45.04% 
+cell 41.69% 
+free_annotation 24.95% 
+subtissue 17.30% 
+cell_ontology_class 13.27% 
+age 0.00% batch 0.00% | mouse.id 0.00% | sex 0.00% | tissue 0.00% | Expressed.Genes 0.00% | UMI.Count 0.00% | Louvain.Cluster 0.00% | leiden 0.00% | 
+
+
+```{r}
+#STEP 5c: Cleaning: convert nan to NA: this is vital as Rstudio does not automatically treat "nan" is not treat as missing.
+meta_data[meta_data == "nan"] <- NA
+
+#Extracts all unique values from each column from meta_data: use this for more in depth information
+#lapply(meta_data, unique)  #Unhash this to print details 
+```
+
+
+
+
+```{r}
+#STEP 6: Now create Seurat Object by combining cleaned expression data with the corresponding metadata
+# Create a Seurat object to enable downstream single-cell analysis 
+# The Seurat object stores both the gene expression matrix (expr_matrix) and associated metadata (meta_data),
+# allowing integrated analysis, clustering, visualisation, and annotation of cells.
+
+seurat_object <- CreateSeuratObject(counts = expr_matrix, meta.data=meta_data)
+
+# Inspect the first few rows of metadata stored in the Seurat object's S4 slot
+# This confirms that meta_data was successfully added to the Seurat object.
+head(seurat_object@meta.data)
+```
+
+
+
+
+```{r}
+#STEP 7: Perform Quality Control (QC) pipeline on seurat object 
+
+#Remove low-quality cells (cells with < 200 genes might be empty/damaged/dying; cells with > 6000 genes might be doublets)
+#Removes likely dead/dying cells (<200 genes) and potential doublets or multiplets (>6000 genes).
+#Prevents artefacts in downstream analysis and ensures only biologically meaningful cells remain.
+seurat_object <- subset(seurat_object, subset = nFeature_RNA > 200 & nFeature_RNA < 6000)
+
+#Filtering Removes cells with high mitochondrial gene content (> 5%) - indicative of dying cells = Removes dying or broken cells which could bias results
+seurat_object[["percent.mt"]] <- PercentageFeatureSet(seurat_object, pattern = "^mt-")
+seurat_object <- subset(seurat_object, subset = percent.mt < 5)
+
+# Remove low-quality genes (genes expressed in < 3 cells to reduce noise) - Lowly expressed genes often represent noise = Reduces sparsity and improves computational performance and signal clarity.
+counts <- GetAssayData(seurat_object, assay = "RNA", slot = "counts")
+genes_to_keep <- rowSums(counts > 0) >= 3
+seurat_object <- subset(seurat_object, features = rownames(counts)[genes_to_keep])
+
+
+# Detect and LABEL doublets (to avoid misleading clustering and cell type identification) = Labeling doublets helps avoid spurious clusters or misclassification.
+
+#Confirm Batch Information
+table(seurat_object$batch) #data comes from multiple batches (batch 0, 1, and 2), which likely represent different experimental captures (e.g. different FACS runs, donors, or time points).
+
+#Doublet Detection with Batch Information: Crucial when working with data that comes from multiple batches to avoid creating artificial doublets across the whole dataset, regardless of which FACS batch they came from.
+sce <- scDblFinder(GetAssayData(seurat_object, assay = "RNA", slot = "counts"),
+                   samples = seurat_object$batch)
+
+#Assign Doublet Classification to Seurat Object
+seurat_object$scDblFinder.class <- sce$scDblFinder.class
+
+#Summary of Doublet Classification Counts: check distribution of doublets and singlets in your dataset
+table(seurat_object$scDblFinder.class) #singlet = 53296  doublet = 25992 = 1/3 are almost doublets 
+```
+#18.4% doublets is higher than expected for typical single-cell experiments.
+#For FACS-based datasets, you’d typically expect a lower doublet rate (5–10%), especially compared to droplet-based platforms like 10x Genomics.
+
+
+```{r}
+#STEP 7b: Log-Transform RNA Counts and Visualise by Doublet Classification
+# Add log-transformed features as metadata to the Seurat object
+seurat_object$log_nCount_RNA <- log10(seurat_object$nCount_RNA + 1)
+seurat_object$log_nFeature_RNA <- log10(seurat_object$nFeature_RNA + 1)
+
+#Create scatter plot to visualise relationship between the total RNA counts and the number of features detected in each cell
+
+# Scatter plot of log-transformed nCount_RNA vs nFeature_RNA
+# Points are coloured by 'scDblFinder.class' and plots are faceted by this class
+ggplot(seurat_object@meta.data, aes(x = log_nCount_RNA, y = log_nFeature_RNA, color = scDblFinder.class)) +
+  geom_point(size = 0.4, alpha = 0.6) +
+  facet_wrap(~ scDblFinder.class) +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Log-Transformed RNA Counts and Feature Detection by Doublet Classification",
+    x = "Log10 Total RNA Counts (nCount_RNA + 1)",
+    y = "Log10 Number of Genes Detected (nFeature_RNA + 1)",
+    color = "scDblFinder Classification"
+  )
+```
+#Cells classified as doublets had significantly higher nCount_RNA and nFeature_RNA values compared to singlets 
+#This is consistent with the expectation that doublets capture transcriptomes from two or more cells, thereby inflating feature counts. The distinct distribution provides confidence in the accuracy of doublet classification by scDblFinder.
+
+
+
+```{r}
+#STEP 7c: Remove Doublets to Improve Data Quality
+
+# Doublets are technical artefacts rather than true biological cell states.
+# They can form artificial clusters, distort gene expression profiles, and
+# confound differential expression analysis.
+#
+# Retaining doublets risks false discovery of “novel” or “intermediate” cell types.
+# Typically, FACS sorts one cell per well, so doublets are expected to be <5%,
+# depending on the sorting stringency.
+
+# Remove cells labelled as doublets by scDblFinder to improve accuracy of downstream analyses
+seurat_object <- subset(seurat_object, subset = scDblFinder.class != "doublet")
+
+# Confirm removal of doublets
+summary(seurat_object$scDblFinder.class)
+```
+
+
+```{r}
+#STEP 7d: 
+#Normalisation and variance stabilisation method
+# Normalise (log transform) the data to account for differences in sequencing depth = Brings all cells onto a comparable scale for gene expression.
+seurat_object <- NormalizeData(seurat_object)
+
+# Load Seurat’s built-in cell cycle gene list
+cc.genes <- Seurat::cc.genes
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Score cell cycle phases using Seurat's built-in gene sets
+cc.genes <- Seurat::cc.genes
+seurat_object <- CellCycleScoring(seurat_object,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = TRUE)
+
+# Identify the top 2000 highly variable genes using the 'vst' method
+# This transformation is well-suited to log-normalised data and 
+# prioritises genes that contribute most to biological variability.
+seurat_object <- FindVariableFeatures(seurat_object, selection.method = "vst", nfeatures = 2000)
+
+# Calculate the percentage of ribosomal gene expression: Ribosomal genes encode components of the ribosome (Rps = small subunit, Rpl = large subunit).
+#High expression can indicate high protein synthesis, often seen in proliferating or metabolically active cells.
+# Can be a confounding technical factor: Overrepresented ribosomal genes can dominate and obscure true biological signals.
+# Used for regression: Removing its influence via regression helps clarify cell type/states in PCA, clustering + differential expression
+seurat_object[["percent.ribo"]] <- PercentageFeatureSet(seurat_object, pattern = "^Rps|^Rpl")
+
+# Regress out the following sources of unwanted variation:
+# - Mitochondrial gene expression (%MT): indicator of cellular stress/apoptosis
+# - Ribosomal gene expression (%Ribo): marker of translation rate, often confounding in active or proliferative cells
+# - Cell cycle scores (S.Score, G2M.Score): reduces variance introduced by proliferative state, which can obscure biological signals
+
+seurat_object <- ScaleData(seurat_object, 
+                           vars.to.regress = c("percent.mt", "percent.ribo", "S.Score", "G2M.Score"))
+
+####Regressing out percent.mt after filtering on it
+#	•	This is not contradictory:
+#	•	Filtering removes extreme cells based on %MT.
+#	•	Regressing removes residual variation due to %MT across remaining cells.
+#	•	This two-step approach is common and considered good practice.
+
+### Why Not to Use `SCTransform()` for Smart-seq2 (FACS) Data
+#- `SCTransform()` assumes that gene expression follows a **negative binomial distribution**, which only applies to **UMI-based data** (e.g., 10x Genomics).
+
+#Smart-seq2 = captures full-length transcripts and amplifies cDNA, introducing different technical noise + non-UMI count inflation.
+#- Using `SCTransform() on Smart-seq2 data can lead to:
+#  -Inaccurate normalisation
+#  -Misleading clustering and marker detection
+#  -False biological signals
+```
+
+
+```{r}
+# STEP 8a: Perform PCA to reduce dimensionality and inspect/visualise batch effects before correction
+# After Q steps, PCA captures the main sources of variation in the data, including both biological signals and potential batch effects.
+
+# Run PCA on the Seurat object using the previously identified highly variable features
+seurat_object <- RunPCA(seurat_object, features = VariableFeatures(seurat_object))
+
+# Save the updated Seurat object containing PCA results to the your home directory
+# Saving the object allows you to close R and reload it later without rerunning previous steps
+saveRDS(seurat_object, file = file.path(path.expand("~"), "seurat_object_with_pca.rds"))
+
+#NB: Visualising PCs can help identify which principal components separate cells by batch rather than biology,
+#guiding decisions on which PCs to include or adjust during batch effect correction.
+```
+
+
+```{r}
+# Step 8b: Visualise cells projected onto the first two principal components (PCs) coloured by batch/sample ID to assess batch effects
+
+# Inspect the first few rows of the metadata to verify which columns are available for colouring plots
+head(seurat_object@meta.data)  # Confirm presence of the "batch" column to use for colouring
+
+# Visualise PCA plot coloured by batch to detect clustering driven by batch effects
+DimPlot(seurat_object, reduction = "pca", group.by = "batch") + ggtitle("PCA Before Batch Correction")
+
+
+# Interpretation: A strong batch effect is indicated if cells cluster primarily by batch ID (e.g., 0, 1, 2) rather than being evenly mixed,
+# which suggests batch correction will be necessary before downstream analyses.
+
+```
+
+    
+    
+```{r}
+# STEP 9: REMOVE BATCH EFFECTS using Harmony to correct for linear and nonlinear batch effects while preserving biological variation
+
+#Using harmony (Harmony is faster and more memory-efficient = no need to split object prior to correction + Harmony scales better! + preserves global structure + lower risk of overcorrection)
+#	•	Harmony was used because it is faster, more memory-efficient, and simpler to apply.
+#	•	It scales better to large datasets and many batches.
+#	•	It preserves global biological variation better while removing batch effects.
+#	•	It avoids the complexity and overhead of splitting and integrating batches separately as Seurat’s standard integration workflow
+seurat_object <- RunHarmony(seurat_object, group.by.vars = "batch")
+
+#batch-corrected embeddings are stored in the "harmony" reduction slot:
+seurat_object@reductions$harmony
+
+#Batch-corrected embeddings are stored in the harmony reduction slot:
+head(seurat_object@reductions$harmony)
+```
+
+	•	“Harmony converged after 3 iterations”
+Harmony’s batch correction algorithm iteratively adjusts the data to remove batch effects while preserving biological variation. It stopped after 3 iterations because it reached a stable solution — meaning further adjustments were negligible, so the correction is complete.
+	•	“A dimensional reduction object with key harmony_”
+Harmony results are stored as a new dimensionality reduction in your Seurat object, labeled with the prefix harmony_. This is similar to PCA or UMAP results but reflects batch-corrected embeddings.
+	•	“Number of dimensions: 50”
+Harmony produced 50 dimensions (components) of batch-corrected data. You can use these dimensions for downstream analysis like clustering or visualization.
+	•	“Number of cells: 79288”
+The dataset contains 79,288 single cells that were processed.
+	•	“Projected dimensional reduction calculated: TRUE”
+The dimensional reduction includes projections of all cells onto the Harmony components.
+	•	“Jackstraw run: FALSE”
+Jackstraw is a method to assess the statistical significance of principal components. It was not run here for Harmony, which is common as Jackstraw is usually done on PCA components.
+	•	“Computed using assay: RNA”
+Harmony used the “RNA” assay data (the gene expression matrix) as input for batch correction.
+
+
+```{r}
+# STEP 10: Assess Batch Effect Before Correction – UMAP Based on PCA
+
+# This step provides a baseline UMAP embedding to visualise how strongly batch effects influence your data
+# before applying batch correction. Later, compare this with a UMAP generated from Harmony-corrected embeddings 
+# to evaluate the effectiveness of batch correction.
+
+plan(sequential)  # Run future computations sequentially to avoid parallel processing issues
+
+# Construct the shared nearest neighbour (SNN) graph using PCA embeddings (pre-batch correction)
+seurat_object <- FindNeighbors(seurat_object, reduction = "pca", dims = 1:20)
+
+# Identify clusters using the Louvain algorithm based on PCA space
+seurat_object <- FindClusters(seurat_object, resolution = 0.5)
+
+# Perform UMAP dimensionality reduction using the PCA embeddings (before batch correction)
+seurat_object <- RunUMAP(seurat_object, reduction = "pca", dims = 1:20)
+
+# Visualise UMAP coloured by batch ID to check for batch-driven clustering
+DimPlot(seurat_object, reduction = "umap", group.by = "batch") +
+  ggtitle("UMAP coloured by batch (Pre-Harmony correction)")
+
+# Interpretation:
+# If cells cluster primarily by batch ID in this plot, it suggests a strong batch effect.
+# This justifies the need for batch correction.
+# Compare this plot with the Harmony-corrected UMAP to assess how well batch correction has mitigated this effect.
+```
+
+
+
+
+```{r}
+#STEP 11: Clustering Using Harmony Embeddings (After Harmony batch correction)
+#Using Harmony embeddings ensures that:
+#	•	The clustering is based on biological similarity between cells.
+#	•	Batch effects no longer dominate the clustering structure.
+#	•	You can meaningfully interpret your clusters in downstream analysis (e.g., marker gene detection, trajectory analysis).
+
+#Construct nearest neighbour graph using Harmony embeddings
+seurat_object <- FindNeighbors(seurat_object, reduction = "harmony", dims = 1:20) 
+
+#Identify clusters using Louvain/Leiden algorithm
+seurat_object <- FindClusters(seurat_object, resolution = 0.5)  # resolution can be adjusted if needed
+#Applies a clustering algorithm (like Louvain or Leiden) on this neighbor graph to identify groups of cells that likely share similar biological characteristics.
+#	•	The resolution parameter controls cluster granularity:
+#	•	Higher values → more, smaller clusters
+#	•	Lower values → fewer, larger clusters
+```
+
+#This output shows 31 clusters using the Louvain method on the nearest neighbor graph built from Harmony embeddings
+#A very high modularity score indicating strong cluster structure.
+
+
+```{r}
+#STEP 11b: Visualising Batch Correction Using UMAP
+
+#Project data into 2D space using the batch-corrected Harmony embeddings.
+seurat_object <- RunUMAP(seurat_object, reduction = "harmony", dims = 1:20)
+
+
+#This plot shows if cells cluster by batch
+DimPlot(seurat_object, reduction = "umap", group.by = "batch") + ggtitle("UMAP coloured by batch: Following Harmony batch correction")
+
+#	Good Batch Correction: Cells from different batches are well mixed within clusters.
+#	Poor Batch Correction: Cells form distinct clusters by batch, indicating batch effects still remain.
+```
+	•	This UMAP was generated after batch correction using Harmony.
+	•	Ideally, cells from different batches should be well-mixed within each biological cluster.
+	•	In your plot:
+	•	Green cells dominate most clusters, meaning batch 1 might be the largest or most retained.
+	•	Red and blue cells are somewhat integrated, but some clustering of batch 2 (blue) cells in the bottom right suggests partial batch effect remains in that region.
+
+The post-Harmony UMAP demonstrates effective batch correction. The distinct separation of clusters by batch observed in the pre-Harmony plot has been successfully mitigated. This indicates that Harmony effectively aligned the datasets across batches, enabling better biological interpretation.
+
+Pros:
+	•	Reduced batch-driven clustering: Previously distinct clusters based on batch identity are now integrated, suggesting that technical variation has been minimized.
+	•	Improved comparability: Cells from different batches are now mixed within biologically relevant clusters, enhancing the reliability of downstream analyses (e.g., differential expression).
+	•	Preserved structure: Harmony retains key biological variation, as evidenced by the continued presence of meaningful clustering patterns after correction.
+
+
+Cons:
+Harmony has partly corrected batch effect, as there's good mixing of colors in many regions.
+	•	Some residual batch-specific clustering may remain, especially on the edges of some clusters.
+	•	This could be due to:
+	•	Biological variation that correlates with batch (e.g. different ages, conditions)
+	•	Unequal distribution of cell types across batches
+
+
+
+
+PART 4: Phylostrata Integration
+
+```{r}
+#Step 1
+#Extract Rik ID gene names for mapping 
+
+# Get the total number of gene features in the object = #22899 total genes 
+length(rownames(seurat_object))
+
+# Display the first 10 gene names (feature IDs) in the Seurat object
+head(rownames(GetAssayData(seurat_object[["RNA"]], slot = "counts")))
+
+# Extract gene names
+gene_names <- rownames(seurat_object)
+
+# Convert to data frame
+gene_df <- data.frame(Gene = gene_names)
+
+# View in a separate tab in RStudio
+#View(gene_df)
+
+## Identify Genes Ending in “Rik”
+# Extract gene names
+gene_names <- rownames(seurat_object)
+
+# Find all gene names ending in "Rik"
+rik_genes <- grep("Rik$", gene_names, value = TRUE)
+
+# Number of genes ending with "Rik"
+length(rik_genes)
+
+# Convert to a data frame
+rik_genes_df <- data.frame(Gene = rik_genes)
+
+# Save to CSV in your home directory or any accessible folder
+write.csv(rik_genes_df, file = "rik_genes.csv", row.names = FALSE)
+
+
+#Extract ALL gene names for mapping 
+getwd()
+# Extract gene names (rownames) from Seurat object
+gene_names <- rownames(seurat_object)
+
+# Convert to data frame with one column named "Gene"
+gene_names_df2 <- data.frame(Gene = gene_names)
+#View(gene_names_df2)
+# Save to the specified folder in your home directory
+write.csv(gene_names_df2, file = "~/entire_gene_row_names.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+
+```{r}
+##STEP 2: Get ensemble IDs for mice: now convert it to human ensembl ID
+#make a csv file with the unique Rik IDs + then convert to entrez / ensemble 
+#problem = mice ID is Rik currently --> need to change to ensemble ID --> turn into csv file
+
+# Extract all gene names from the Seurat object
+gene_names <- rownames(seurat_object)
+
+# Filter for genes ending with "Rik" (e.g., 0610005C13Rik)
+rik_genes <- gene_names[grepl("Rik$", gene_names)]
+
+# Optional: Print the number of Rik genes identified
+cat("Number of unique Rik genes:", length(rik_genes), "\n")
+
+# Convert to a data frame
+rik_genes_df <- data.frame(Gene = rik_genes)
+
+# Save to CSV for manual upload to MGI Batch Query
+write.csv(rik_genes_df, file = "unique_Rik_genes.csv", row.names = FALSE)
+
+#Use bash commands to move file on to my local desktop so it can be uploaded to Manually upload to the MGI batch query tool
+#This will allow me to map Rik gene symbols to their corresponding:
+#	•	MGI IDs
+#	•	Entrez IDs
+#	•	Ensembl IDs
+
+#Output file name = MGIBatchReport_20250628_152059.txt produced and downloaded so it can be transfered to working directory in HPC 
+```
+
+
+```{bash}
+#Part 2b: Output file name = MGIBatchReport_20250628_152059.txt (contains mice genes with Ensembl, Entrez + RikID) is downloaded on to desktop and then moved to working directory HPC
+
+#Log in to HPC via SFTP
+sftp -i~/.ssh/panda k24090847@hpc.create.kcl.ac.uk
+
+#Upload the file from your local machine to working directory in HPC
+put /Users/madihakhan/Desktop/MGIBatchReport_20250628_152059.txt /users/k24090847/TMS_JUNE_4.6
+
+#Key column in this file: MGI Gene/Marker ID, Ensembl ID (e.g., ENSMUSG00000109644), Symbol (e.g., 0610005C13Rik, Atraid)
+```
+
+
+```{r}
+#Part 3: Map Human Genes to Mouse Orthologs Using gprofiler2
+
+# Read the CSV file containing human gene symbols
+human_genes <- read.csv("~/gene_phylostrata.csv") 
+
+# Preview the data
+head(human_genes)
+
+# Extract the 'GeneID' column as a vector of human gene symbols
+human_genes2 <- human_genes$GeneID
+
+# Preview the gene vector
+head(human_genes2)
+
+# Map human genes to mouse orthologs
+# 'query' is the list of human genes
+# 'target_organism' specifies the species to map to (mouse: "mmusculus")
+orthologs <- gorth(
+  query = human_genes2,
+  target_organism = "mmusculus"
+)
+
+# Display the ortholog mapping results
+print(orthologs)
+
+# Save the ortholog mapping to a CSV file (to working directory)
+write.csv(orthologs, "human_to_orthologs.csv") 
+#Started with 17,319 human genes, but your orthologs result has 18,285 rows because some human genes map to multiple mouse orthologs
+
+head(orthologs)
+```
+
+
+
+```{r}
+#Step 4: Map RIK IDs to Phylostrata
+
+#Load MGI batch report (RIK → Mouse Ensembl)
+mgi <- read_tsv("~/MGIBatchReport_20250628_152059.txt", col_types = cols(.default = "c"))
+
+# Rename and select relevant columns
+mgi_subset <- mgi %>%
+  dplyr::rename(Rik_IDs = Input) %>%
+  dplyr::select(Rik_IDs, Symbol, `Ensembl ID`)
+
+#Load human-to-mouse ortholog mapping (Human → Mouse Ensembl) Select and rename relevant columns
+ortho_clean <- read_csv("human_to_orthologs.csv", col_types = cols(.default = "c")) %>%
+  dplyr::select(Human_Gene_ID = input,
+                Human_Ensembl = input_ensg,
+                Mouse_Ensembl = ortholog_ensg) %>%
+  dplyr::distinct()
+
+#Join MGI and Ortholog Tables by Mouse Ensembl ID
+joined_data <- mgi_subset %>%
+  dplyr::rename(Mouse_Ensembl = `Ensembl ID`) %>%
+  left_join(ortho_clean, by = "Mouse_Ensembl")
+
+#Both mgi_subset and ortho_clean contain multiple rows with the same Mouse_Ensembl IDs, which leads to a many-to-many join. This causes rows to be duplicated, potentially inflating your dataset = inflating dataset
+
+#	•	In mgi_subset, a single Mouse_Ensembl ID might appear multiple times, for example due to multiple RIK IDs mapping to the same Ensembl gene.
+#	•	In ortho_clean, one mouse gene might be an ortholog for multiple human genes (or appear multiple times due to redundancy or alternative mappings).
+
+###Inspect the many to many relationship 
+# Check for duplicate Ensembl IDs in MGI
+table(duplicated(mgi_subset$`Ensembl ID`))      
+
+#	•	Interpretation:
+#	•	You have 2203 unique Ensembl IDs in your MGI dataset.
+#	•	But 14,076 rows are duplicates, meaning those Ensembl IDs appear multiple times — likely because each gene has multiple associated GO terms or annotations #in the MGI report.
+
+# Check for duplicates in orthologs
+table(duplicated(ortho_clean$Mouse_Ensembl))    
+
+#	•	Interpretation:
+#	•	You have 15,355 unique Mouse Ensembl gene IDs in your ortholog dataset.
+#	•	And 2,922 Mouse Ensembl IDs are duplicated, meaning multiple human genes can map to the same mouse gene (due to 1-to-many orthologs or gene families).
+
+#In dplyr::left_join(x, y, by = "Mouse_Ensembl"), both x (mgi_subset) and y (ortho_clean) contain duplicate Mouse Ensembl IDs.
+#This causes multiple matches on both sides — leading to many-to-many merges, which inflate the number of rows in the output unexpectedly.
+
+##Retain One Mapping per RIK ID: Use the first valid mapping per Rik_IDs:
+best_mapping <- joined_data %>%
+  group_by(Rik_IDs) %>%
+  slice(1) %>%
+  ungroup()
+View(best_mapping) # 2,274 entries RikIDs
+
+
+
+#Load phylostrata file
+phylostrata <- read_csv("~/gene_phylostrata.csv") %>%
+  dplyr::select(GeneID, Entrez, Phylostrata)
+
+
+# Join All Mappings: RIK → Mouse Ensembl → Human Gene ID → Phylostrata
+final_mapped <- best_mapping %>%
+  left_join(phylostrata, by = c("Human_Gene_ID" = "GeneID")) %>%
+  distinct()  # Remove duplicates if any
+#View(final_mapped)
+
+#Check for duplicates 
+any(duplicated(final_mapped)) #no row level redundancies / duplications
+
+#Extract just the rows with values for Rik_IDs + phylostratum (should be 465 rows) 
+final_mapped_filtered <- final_mapped %>%
+  filter(!is.na(Rik_IDs) & !is.na(Phylostrata))
+# View the result
+#View(final_mapped_filtered)
+
+#Save as csv in working directory 
+write_csv(final_mapped_filtered, "final_Rik_mapped_phylostrata.csv")
+
+#	•	Dataset has 2,274 entries (RIK IDs or genes) in best_mapping variable. 
+#	•	Only 465 entries (20%) have a Phylostrata value.
+#	•	This indicates limited coverage, possibly because:
+#	  Some genes have no orthologs mapped to humans.
+#	  Some human orthologs could not be matched to phylostrata.
+```
+
+WRITE UP NOTES 
+
+#Loss of genes occured in this process because
+Some RIK genes may not have Ensembl IDs in the MGI batch report.
+	•	Example: Pseudogenes, deprecated symbols, or non-coding RNAs might not be mapped in MGI.
+	•	fix: Not much you can do unless you get a more complete ID mapping.
+
+
+Loss reason: Some mouse Ensembl IDs have no human ortholog in your ortholog file.
+	•	Why: Not all mouse genes have clear 1:1 orthologs in humans (especially RIK genes, which are often mouse-specific or uncharacterised).
+
+	•	Loss reason: Some human genes (even if mapped) are not present in your gene_phylostrata.csv file.
+	•	Why: Your phylostrata file may be incomplete (e.g., only protein-coding genes or a filtered set were annotated).
+	
+RIKEN IDs (Rik_IDs) used in older datasets like Tabula Muris Senis FACS may refer to outdated or deprecated gene symbols. Here’s how this affects your mapping:
+These outdated RIK IDs might no longer be present in the current versions of:
+	•	MGI (Mouse Genome Informatics),
+	•	Ensembl Gene IDs,
+	•	or NCBI Entrez Gene.
+	•	As a result, they fail to match any human ortholog or phylostrata annotation.
+The Tabula Muris Senis (TMS) FACS dataset was originally published in 2020. 
+
+As for the RIK (RIKEN cDNA) gene IDs and their status in the Entrez database (maintained by NCBI), many of them were originally annotated in the early 2000s. However, over time, some RIK IDs have been:
+	•	Deprecated
+	•	Merged with other gene entries
+	•	Reclassified as pseudogenes or non-coding
+	•	Renamed to new official symbols
+
+Very likely that some of the RIK IDs in the TMS dataset are outdated and no longer appear in current Entrez or Ensembl releases.
+
+What to do:
+	•	Use latest MGI batch reports to update or map old RIK IDs to current Ensembl or Entrez IDs.
+	•	If IDs are not found, they may have been retired or never officially annotated, particularly for less-characterised genes.
+
+
+```{r}
+# Step 5: Load your mouse gene list (contains column 'Gene') #22899 TOTAL genes
+full_gene_list <- read_csv("~/TMS_JUNE_4/entire_gene_row_names.csv")
+#View(full_gene_list)
+
+# Filter Out RIKEN Genes: Remove all rows where Gene contains "Rik"  = should be left with 20622 genes
+filtered_full_gene_list <- full_gene_list %>%
+  filter(!str_detect(Gene, "Rik"))
+
+#  Report Filtering Summary (check how many were removed)
+cat("Removed genes containing 'Rik':", nrow(full_gene_list) - nrow(filtered_full_gene_list), "\n")
+cat("Remaining genes:", nrow(filtered_full_gene_list), "\n")
+
+# View the filtered result
+#View(filtered_full_gene_list)
+
+nrow(full_gene_list)                   # Total number of genes originally (should be 22,899)
+nrow(filtered_full_gene_list)         # Number of genes remaining (should be ~20,625)
+nrow(full_gene_list) - nrow(filtered_full_gene_list)  # Number of Rik-containing genes removed = 2277
+```
+
+
+```{r}
+# Step 6: Load Ortholog Mapping File from gprofiler2    #15352
+orthologs <- read_csv("~/human_to_orthologs.csv")
+#View(orthologs)
+
+# Assess Gene Counts Across Datasets: Total genes in each dataset
+n_genes_gene_list <- length(unique(full_gene_list$Gene))
+n_genes_orthologs <- length(unique(orthologs$ortholog_name))
+
+# Number of shared genes = 13431
+shared_genes <- intersect(full_gene_list$Gene, orthologs$ortholog_name)
+n_shared_genes <- length(shared_genes)
+
+# Report Summary Statistics
+cat("Mouse gene list contains:", n_genes_gene_list, "genes\n")                            #= 22899
+cat("Orthologs file contains:", n_genes_orthologs, "mouse genes via human orthologs\n")   #= 15352
+cat("Number of genes shared between the two:", n_shared_genes, "\n")                     #= 13431
+```
+
+
+```{r}
+# Step 7: Map Mouse Genes to Human Orthologs
+
+
+#Preview selected columns using dplyr::select to avoid naming conflicts
+head(orthologs %>% dplyr::select(input, ortholog_name, ortholog_ensg))
+
+
+# Perform inner join to find matched genes
+mapped_genes2 <- filtered_full_gene_list  %>%
+  inner_join(orthologs, by = c("Gene" = "ortholog_name"))
+#View(mapped_genes2)
+
+#Calculate and Print Mapping Statistics
+n_mapped <- nrow(mapped_genes2)
+n_total <- nrow(filtered_full_gene_list )
+
+#Print results
+cat("Mapped genes:", n_mapped, "out of", n_total, "\n")
+cat("Mapping rate:", round(100 * n_mapped / n_total, 2), "%\n")
+
+#### Mapped genes: 14161 out of 20622 
+### Mapping rate: 68.67 %
+
+#View(mapped_genes2)
+```
+
+
+```{r}
+# Step 8: Load the phylostrata file you uploaded earlier
+phylostrata <- read_csv("~/gene_phylostrata.csv")
+#View(phylostrata)
+
+
+# Trim to Relevant Columns only using dplyr::
+phylostrata_trimmed <- dplyr::select(phylostrata, GeneID, Phylostrata)
+# View result
+#View(phylostrata_trimmed)
+
+# Load the file that contains human-to-mouse mapping
+mapped_genes2.2 <- dplyr::select(mapped_genes2, input, Gene)
+#View(mapped_genes2.2)
+
+# Merge using GeneID from phylostrata and input from mapped_genes2
+phylomap_1 <- mapped_genes2.2 %>%
+  left_join(phylostrata_trimmed, by = c("input" = "GeneID"))
+#View(phylomap_1)
+
+```
+
+
+```{r}
+#STEP 9: Add Phylostrata Annotations to Seurat Object (Part A: Gene Symbols / non-RIK IDs)
+
+#Create Named Vector (RIK Symbol → Phylostrata)
+phylostrata_vec_1 <- setNames(phylomap_1$Phylostrata, phylomap_1$Gene)
+#View(phylostrata_vec)
+
+#Filter Genes to those Shared Between Seurat Object and Mapping File (phylomap_1)
+phylomap_subset_1 <- phylomap_1 %>%
+  dplyr::filter(Gene %in% gene_names)
+
+# Get common genes between Seurat object and phylomap_1
+common_genes_1 <- intersect(rownames(seurat_object), phylomap_1$Gene)
+#View(common_genes_1)
+
+# Subset Seurat object for only these genes
+seurat_subset_1 <- subset(seurat_object, features = common_genes_1)
+
+
+# Confirm the number of genes and cells in subsetted object
+#View(seurat_subset_1)  # Expect fewer genes but same number of cells
+#13307 number of genes (after subsetting to only those with phylostrata annotations) + 64695 number of cells (still the same as full dataset)
+
+
+# Check for duplicated gene names before setting rownames
+duplicated_genes <- phylomap_1 %>% 
+  filter(Gene %in% rownames(seurat_subset_1)) %>% 
+  pull(Gene) %>% 
+  duplicated() %>% 
+  any()
+
+if (duplicated_genes) {
+  message("There are duplicated gene names in phylomap_1 that prevent setting unique rownames.")
+  
+  # Remove duplicates keeping the first occurrence
+  phylomap_unique <- phylomap_1 %>%
+    filter(Gene %in% rownames(seurat_subset_1)) %>%
+    distinct(Gene, .keep_all = TRUE)
+  
+  # Use the snippet here to assign cleaned data to metadata
+  seurat_subset_1[["RNA"]]@misc$Phylostrata <- phylomap_unique %>%
+    dplyr::select(Gene, Phylostrata) %>%
+    tibble::column_to_rownames("Gene")
+  
+} else {
+  # Safe to set rownames directly
+  seurat_subset_1[["RNA"]]@misc$Phylostrata <- phylomap_1 %>%
+    filter(Gene %in% rownames(seurat_subset_1)) %>%
+    select(Gene, Phylostrata) %>%
+    tibble::column_to_rownames("Gene")
+}
+
+# Confirm Phylostrata Metadata is Added = 13307 genes + 64785 cells 
+#View(seurat_subset_1[["RNA"]]@misc$Phylostrata)  
+```
+REMOVING DUPLICATES STEP
+
+	1.	Loss of Data by Removing Duplicates:
+It keeps only the first occurrence of each gene and removes any additional rows with the same gene name. If different rows for the same gene contain different or additional information (e.g., different Phylostrata assignments or annotations), that information is lost. This may oversimplify data and potentially discard biologically relevant variants or isoforms.
+
+	2.	Assumption of Equivalence Among Duplicates:
+This approach assumes that duplicate rows for a gene are redundant or identical. If duplicates actually represent distinct but related biological entities (eg transcript variants, or different experimental annotations), removing duplicates this way could introduce bias or misinterpretation.
+
+	3.	Effect on Downstream Analysis:
+By reducing the dataset, some genes may lose their full context. For example, differential expression or pathway analyses might be affected if the unique row no longer fully represents the gene’s biology.
+
+	4.	No Resolution of Which Duplicate to Keep:
+The code keeps the first row it encounters, but the “first” row may not be the best representative. Without criteria to select the most informative or reliable entry, this is a blunt tool.
+
+	5.	Potential Mismatch With Seurat Object:
+If the Seurat object rows correspond to specific gene isoforms or annotations not captured by the filtered distinct rows, merging could cause mismatches or missing data.
+
+Summary:
+This step is a pragmatic solution to handle duplicates to allow for unique rownames (required by Seurat). 
+However, it sacrifices the richness of duplicated data and assumes all duplicates are equivalent, which might not always hold biologically. 
+
+	
+```{r}
+#STEP 10: Add Phylostrata to Seurat Object Metadata: part b (RidIDs)
+
+#Read in the mapping (RIK → Phylostrata)
+phylomap_2 <- read.csv("~/final_Rik_mapped_phylostrata.csv", stringsAsFactors = FALSE)
+#View(phylomap_2)
+
+#Create Named Vector (RIK Symbol → Phylostrata)
+phylostrata_vec_2 <- setNames(phylomap_2$Phylostrata, phylomap_2$Rik_Symbol)
+#View(phylostrata_vec)
+
+#Filter Genes to those Shared Between Seurat Object and Mapping File (phylomap_2)
+phylomap_subset_2 <- phylomap_2 %>%
+  dplyr::filter(Rik_IDs %in% gene_names)
+
+#Subset the seurat_object for only the rows that exist in phylomap$Rik_IDs
+common_genes_2 <- intersect(rownames(seurat_object), phylomap_2$Rik_IDs)
+
+# Subset Seurat object based on gene names
+seurat_subset_2 <- subset(seurat_object, features = common_genes_2)
+
+#Confirm the number of rows which represent genes 
+#Seurat_subset keeps all the cells but only includes a smaller number of genes that were matched with your phylomap file for phylostrata analysis.
+#View(seurat_subset_2) #455 number of genes (after subsetting to only those with phylostrata annotations) + 64695 number of cells (still the same as full dataset)
+
+#Standardize column names across different data frames: by renaming RikIDs column to 'gene' in phylomap_2 to match rownames in seurat_subset_2
+#Makes merging easier 
+phylomap_with_gene_2 <- phylomap_2 %>%
+  dplyr::rename(gene = Rik_IDs)
+#View(phylomap_with_gene_2)
+
+#Merge Phylostrata column into seurat_subset metadata
+seurat_subset_2[["RNA"]]@misc$Phylostrata <- phylomap_with_gene_2 %>%
+  dplyr::filter(gene %in% rownames(seurat_subset_2)) %>%
+  dplyr::select(gene, Phylostrata) %>%
+  tibble::column_to_rownames("gene")
+
+#Confirm Phylostrata Metadata is Added
+#View(seurat_subset_2[["RNA"]]@misc$Phylostrata) 
+```
+
+
+
+
+```{r}
+#Step 11: Combining Gene Sets and Merging Phylostrata Metadata Across Seurat Subsets
+
+# Combine gene lists (unique genes from both subsets)
+combined_genes <- union(rownames(seurat_subset_1), rownames(seurat_subset_2))
+
+# Subset original Seurat object with combined genes and all cells
+combined_seurat <- subset(seurat_object, features = combined_genes)
+
+# Merge Phylostrata metadata from both subsets into one data.frame
+phylostrata_combined <- bind_rows(
+  seurat_subset_1[["RNA"]]@misc$Phylostrata %>% rownames_to_column("gene"),
+  seurat_subset_2[["RNA"]]@misc$Phylostrata %>% rownames_to_column("gene")
+) %>%
+  distinct(gene, .keep_all = TRUE) %>%  # Remove duplicates if any
+  column_to_rownames("gene")
+
+# Assign combined Phylostrata metadata to combined_seurat
+combined_seurat[["RNA"]]@misc$Phylostrata <- phylostrata_combined
+
+# Confirm counts
+cat("Number of genes in combined object:", nrow(combined_seurat), "\n")
+cat("Number of cells in combined object:", ncol(combined_seurat), "\n")
+
+# Optionally view
+View(combined_seurat)
+View(combined_seurat[["RNA"]]@misc$Phylostrata)
+
+#Number of genes: 13762 (seurat_subset_1 had 13,307 genes + seurat_subset_2 had 455 genes = 13,762!!) 
+#Number of cells: 64785 = correct number of cells! 
+```
+
+
+
+
+
+
+PART 3: Differential Expression 
+
+```{r}
+##Step 1: CHECK DISTRIBUTION OF Genes with mapped phylostata: checking for phylostrata bias 
+# Extract the phylostrata metadata from combined_seurat
+phylostrata_df <- combined_seurat[["RNA"]]@misc$Phylostrata
+
+# Add gene names as a column
+phylostrata_df <- phylostrata_df %>% 
+  rownames_to_column("Gene")
+
+# Check structure
+head(phylostrata_df)
+```
+```{r}
+
+# Step 1: Extract phylostrata metadata safely
+phylostrata_df <- combined_seurat[["RNA"]]@misc$Phylostrata %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene")
+
+# Step 2: Ensure the Phylostrata column is a clean character vector, then numeric
+phylostrata_df$Phylostrata <- as.character(phylostrata_df$Phylostrata)
+phylostrata_df <- phylostrata_df %>%
+  filter(!is.na(Phylostrata)) %>%
+  mutate(Phylostrata = as.numeric(Phylostrata))   # Now numeric
+
+# Step 3: Count genes per phylostratum
+phylostrata_counts <- phylostrata_df %>%
+  group_by(Phylostrata) %>%
+  summarise(NumGenes = n()) %>%
+  arrange(Phylostrata)
+
+# Step 4: Plot
+ggplot(phylostrata_counts, aes(x = factor(Phylostrata), y = NumGenes, fill = Phylostrata)) +
+  geom_bar(stat = "identity", colour = "black", width = 0.8) +
+  geom_text(aes(label = NumGenes), vjust = -0.4, size = 3.5) +
+  scale_fill_gradient(low = "#4CBB17", high = "#FF55A3") +
+  labs(
+    title = "Gene Distribution Across Phylostrata",
+    subtitle = paste("Total mapped genes:", nrow(phylostrata_df)),
+    x = "Phylostratum",
+    y = "Number of Genes"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+```{r}
+# Display the frequency of genes assigned to each phylostratum
+# This summary helps assess how genes are distributed across evolutionary strata.
+table(phylostrata_df$Phylostrata)
+```
+
+
+```{r}
+#STEP 2: Explore Metadata – Age and Tissue Overview
+
+# View the unique ages
+unique(combined_seurat@meta.data$age)
+
+# View the unique tissues
+unique(combined_seurat@meta.data$tissue)
+
+# Count of cells per age group
+table(combined_seurat@meta.data$age)
+
+# Count of cells per tissue
+table(combined_seurat@meta.data$tissue)
+
+# Create a contingency table of counts per age and tissue
+table(combined_seurat@meta.data$age, seurat_object@meta.data$tissue)
+```
+# most tissues lack cells for 18m and 21m, and cell counts vary across ages and tissues, 
+#If some age groups have many more cells than others, it might bias your DE results.
+
+MAST (Model-based Analysis of Single-cell Transcriptomics) is widely used for single-cell RNA-seq differential expression is exactly because it accounts for differences in the number of cells between conditions (e.g., Condition A vs Condition B).
+
+
+MAST includes a cell-level covariate called cngeneson (cellular detection rate = number of genes detected per cell). This helps:
+	•	Control for cell-to-cell technical variation
+	•	Account for differences in RNA content or quality
+
+By including this covariate, MAST ensures that differences in expression aren’t just due to cells having more total RNA or better detection efficiency.
+
+
+Condition Effect Is Modeled Directly
+
+Even if there are more cells in Condition A than B, MAST still models the effect of condition on both:
+	•	The likelihood that a gene is expressed
+	•	The level of expression (when expressed)
+
+So the number of cells in each group does affect the power of detection but does not bias the result, because MAST models the per-cell gene expression with condition as a fixed effect.
+
+
+
+Differential expression for: All other tissues (3m vs 24m) 
+
+```{r}
+#STEP 3: Differential Expression using MAST
+
+# Set default assay to RNA (normalized counts) = ensures the DE test uses normalized counts, appropriate for MAST, instead of raw counts or other assay data.
+DefaultAssay(combined_seurat) <- "RNA"
+
+#Use each unique tissue in the loop below to perform DE within that tissue.
+all_tissues <- unique(combined_seurat$tissue)
+de_results_list <- list()
+
+#For loop will iterate through each tissue and checks if both age groups "3m" and "24m" (if not = DE analysis is skipped)
+
+for (tis in all_tissues) {
+  seurat_sub <- subset(combined_seurat, subset = tissue == tis)
+  ages_in_tissue <- unique(seurat_sub$age)
+  
+  # Only compare if both ages are present
+  if (all(c("3m", "24m") %in% ages_in_tissue)) {
+    cat("Running DE for tissue:", tis, "\n")
+    
+    #FindMarkers() is a Seurat function used to identify genes that are differentially expressed between 3m and 24m within that tissue.
+    de_res <- FindMarkers(
+      object = seurat_sub,
+      ident.1 = "3m",
+      ident.2 = "24m",
+      group.by = "age",
+      test.use = "MAST",
+      logfc.threshold = 0 ## No logFC threshold to retain all genes
+    )
+    
+    # Store result for this tissue
+    de_results_list[[tis]] <- de_res
+  } else {
+    cat("Skipping tissue:", tis, "- required ages not present\n")
+  }
+}
+
+# Save all DE results into a single RDS file (avoids .rdf warning)
+saveRDS(de_results_list, file = "de_results_list.rds")
+cat("Saved full DE results list to de_results_list.rds\n")
+
+#The DE output includes:
+#	avg_log2FC: log fold change between 3m and 24m.
+
+#	p_val_adj: adjusted p-values. The adjusted p-value controls for the false discovery rate (FDR) caused by testing thousands of genes simultaneously.
+#	It is calculated using the Benjamini-Hochberg method on the raw p-values from the MAST test.
+
+#	Genes with p_val_adj < 0.05 are considered statistically significant after correcting for multiple testing it shows which genes are more or less expressed at 3m vs 24m, for each tissue.
+
+#Log2FC = (-1 and 1)
+#A positive log2FC means higher expression in 3m (condition a)
+#A negative log2FC means higher expression in 24m (condition b)
+```
+
+
+```{r}
+# Get versions of all loaded packages
+pkg_versions <- data.frame(
+  Package = loadedNamespaces(),
+  Version = sapply(loadedNamespaces(), function(pkg) as.character(packageVersion(pkg))),
+  stringsAsFactors = FALSE
+)
+
+# View it in console
+print(pkg_versions)
+
+# Save to CSV for documentation
+write.csv(pkg_versions, "R_package_versions.csv", row.names = FALSE)
+```
+
+
+
+
+
+```{r}
+# Step 4: Summarise and visualise Differential Expression by Tissue and Age
+
+# Create summary statistics dataframe
+de_summary <- data.frame(
+  tissue = character(),
+  total_genes_tested = integer(),
+  significant_genes = integer(),
+  up_in_3m = integer(),
+  up_in_24m = integer(),
+  stringsAsFactors = FALSE
+)
+
+for (tis in names(de_results_list)) {
+  de_res <- de_results_list[[tis]]
+  
+  # Skip if no results
+  if (is.null(de_res) || nrow(de_res) == 0) next
+  
+  # Total genes tested
+  total <- nrow(de_res)
+  
+  # Significant DE genes (adj p < 0.05)
+  sig <- de_res[de_res$p_val_adj < 0.05, ]
+  
+  # Upregulated in 3m (log2FC > 0)
+  up_3m <- sum(sig$avg_log2FC > 0)
+  
+  # Upregulated in 24m (log2FC < 0)
+  up_24m <- sum(sig$avg_log2FC < 0)
+  
+  # Append to summary
+  de_summary <- rbind(de_summary, data.frame(
+    tissue = tis,
+    total_genes_tested = total,
+    significant_genes = nrow(sig),
+    up_in_3m = up_3m,
+    up_in_24m = up_24m
+  ))
+}
+
+# View the summary
+print(de_summary)
+```
+
+
+
+
+```{r}
+#Step 5: Boxplots to visualise Top DE Genes Upregulated in 24m
+
+# Loop through each tissue for 24m-upregulated genes
+for (tis in names(de_results_list)) {
+  
+  de_res <- de_results_list[[tis]]
+  if (nrow(de_res) == 0) next
+  
+  # Genes upregulated in 24m (logFC < 0 since ident.1 = "3m", ident.2 = "24m")
+  de_up_24m <- de_res[
+    de_res$avg_log2FC < 0 & 
+    de_res$p_val_adj < 0.05, 
+  ]
+  
+  top_genes_24m <- rownames(head(de_up_24m[order(de_up_24m$p_val_adj), ], 3))
+  if (length(top_genes_24m) == 0) next
+  
+  # Subset Seurat object to tissue
+  seurat_sub <- subset(combined_seurat, subset = tissue == tis)
+  
+  # Get expression + age
+  expr_data <- FetchData(seurat_sub, vars = c(top_genes_24m, "age"))
+  expr_long <- melt(expr_data, id.vars = "age", variable.name = "Gene", value.name = "Expression")
+  expr_long$age <- factor(expr_long$age, levels = c("3m", "24m"))
+  
+  # Plot
+  p1 <- ggplot(expr_long, aes(x = age, y = Expression, fill = age)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    facet_wrap(~Gene, scales = "free_y") +
+    scale_fill_manual(values = c("3m" = "deeppink", "24m" = "skyblue")) +
+    labs(title = paste("Top DE Genes Upregulated in 24m –", tis),
+         x = "Age Group", y = "Normalised Expression") +
+    theme_minimal()
+  
+  print(p1)
+}
+
+# -----------------------------
+
+# Loop through each tissue for 3m-upregulated genes
+for (tis in names(de_results_list)) {
+  
+  de_res <- de_results_list[[tis]]
+  if (nrow(de_res) == 0) next
+  
+  # Genes upregulated in 3m (logFC > 0 since ident.1 = "3m", ident.2 = "24m")
+  de_up_3m <- de_res[
+    de_res$avg_log2FC > 0 & 
+    de_res$p_val_adj < 0.05, 
+  ]
+  
+  top_genes_3m <- rownames(head(de_up_3m[order(de_up_3m$p_val_adj), ], 3))
+  if (length(top_genes_3m) == 0) next
+  
+  # Subset Seurat object to tissue
+  seurat_sub <- subset(combined_seurat, subset = tissue == tis)
+  
+  # Get expression + age
+  expr_data <- FetchData(seurat_sub, vars = c(top_genes_3m, "age"))
+  expr_long <- melt(expr_data, id.vars = "age", variable.name = "Gene", value.name = "Expression")
+  expr_long$age <- factor(expr_long$age, levels = c("3m", "24m"))
+  
+  # Plot
+  p2 <- ggplot(expr_long, aes(x = age, y = Expression, fill = age)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    facet_wrap(~Gene, scales = "free_y") +
+    scale_fill_manual(values = c("3m" = "deeppink", "24m" = "skyblue")) +
+    labs(title = paste("Top DE Genes Upregulated in 3m –", tis),
+         x = "Age Group", y = "Normalised Expression") +
+    theme_minimal()
+  
+  print(p2)
+}
+```
+
+
+
+```{r}
+### Step 6: Heatmap of Top 20 Genes Upregulated in 24-Month-Old Mice Across Tissues Versus 3 Months
+for (tis in names(de_results_list)) {
+  
+  # Filter DE genes upregulated in 24m (logFC > 0)
+  upregulated_24m <- de_results_list[[tis]] %>%
+    dplyr::filter(avg_log2FC > 0) %>%        # Only genes up in 24m vs 3m
+    dplyr::arrange(p_val_adj)                # Sort by adjusted p-value
+  
+  # Take top 20 genes by adjusted p-value
+  top_genes <- head(rownames(upregulated_24m), 20)
+  
+  # Subset Seurat object for this tissue
+  seurat_sub <- subset(combined_seurat, subset = tissue == tis)
+  
+  # Extract normalized expression matrix for top genes
+  expr_mat <- as.matrix(GetAssayData(seurat_sub, assay = "RNA", slot = "data")[top_genes, ])
+  
+  # Create annotation for age groups
+  annotation_col <- data.frame(Age = factor(seurat_sub$age, levels = c("3m", "24m")))
+  rownames(annotation_col) <- colnames(expr_mat)
+  
+  # Scale expression matrix (z-score per gene)
+  expr_mat_scaled <- t(scale(t(expr_mat)))
+  
+  # Plot heatmap
+  pheatmap(expr_mat_scaled,
+           annotation_col = annotation_col,
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           show_colnames = FALSE,
+           show_rownames = TRUE,
+           fontsize_row = 8,
+           main = paste("Top 20 genes upregulated in 24m -", tis))
+}
+```
+
+
+
+
+
+
+
+```{r}
+# STEP 7: Phylostrata-Integrated Volcano Plots by Tissue 24m vs 3m
+
+
+# Extract Phylostrata data from Seurat object
+phylostrata_raw <- combined_seurat[["RNA"]]@misc$Phylostrata
+
+if (is.null(dim(phylostrata_raw))) {
+  phylostrata_df <- data.frame(
+    gene = names(phylostrata_raw),
+    phylostratum = as.integer(phylostrata_raw)
+  )
+} else {
+  phylostrata_df <- data.frame(
+    gene = rownames(phylostrata_raw),
+    phylostratum = as.integer(phylostrata_raw[, 1])
+  )
+}
+
+# Loop through each tissue and plot volcano plots
+for (tis in names(de_results_list)) {
+
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) next
+
+  # Add gene name and calculate -log10 adjusted p-value
+  de_res$gene <- rownames(de_res)
+  de_res$log10_padj <- -log10(de_res$p_val_adj + 1e-300)
+
+  # Define significance (adjusted p-value < 0.05 and abs log2FC > 0.25)
+  de_res$significant <- with(de_res, p_val_adj < 0.05 & abs(avg_log2FC) > 0.25)
+
+  # Fix direction labelling logic
+  de_res$direction <- "Not Significant"
+  de_res$direction[de_res$significant & de_res$avg_log2FC > 0] <- "Upregulated in 3m"
+  de_res$direction[de_res$significant & de_res$avg_log2FC < 0] <- "Upregulated in 24m"
+
+  # Merge phylostrata info
+  de_res <- merge(de_res, phylostrata_df, by = "gene", all.x = TRUE)
+
+  # Label for top genes
+  de_res$label <- paste0(de_res$gene, " (PS", de_res$phylostratum, ")")
+
+  # Select top 5 upregulated genes in each group
+  top_up_24m <- de_res %>%
+    filter(direction == "Upregulated in 24m") %>%
+    arrange(p_val_adj) %>%
+    head(5)
+
+  top_up_3m <- de_res %>%
+    filter(direction == "Upregulated in 3m") %>%
+    arrange(p_val_adj) %>%
+    head(5)
+
+  top_genes <- bind_rows(top_up_24m, top_up_3m)
+
+  # Volcano plot
+  p <- ggplot(de_res, aes(x = avg_log2FC, y = log10_padj)) +
+    geom_point(aes(color = direction), alpha = 0.6) +
+    geom_text_repel(
+      data = top_genes,
+      aes(label = label),
+      size = 2.5,
+      max.overlaps = 10,
+      box.padding = 0.3,
+      force = 1.5
+    ) +
+    scale_color_manual(values = c(
+      "Upregulated in 3m" = "deeppink",
+      "Upregulated in 24m" = "skyblue",
+      "Not Significant" = "grey"
+    )) +
+    geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed", color = "blue") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+    labs(
+      title = paste(
+        "Volcano Plot of Differential Gene Expression in", 
+        tis, 
+        "\n(3-month vs 24-month)"
+      ),
+      x = "Log₂ Fold Change (3-month vs 24-month)",
+      y = "−Log₁₀ Adjusted P-value",
+      color = "Expression Direction"
+    ) +
+    theme_minimal()
+
+  print(p)
+}
+```
+
+
+
+
+
+
+
+```{r}
+# Load phylostrata metadata
+ps_data <- as.data.frame(combined_seurat[["RNA"]]@misc$Phylostrata)
+colnames(ps_data) <- "Phylostrata"
+ps_data$Gene <- rownames(ps_data)
+
+# Loop through each tissue
+for (tis in names(de_results_list)) {
+  
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) next
+  
+  # Add gene names as a column
+  de_res$Gene <- rownames(de_res)
+  
+  # Merge with phylostrata
+  de_merged <- merge(de_res, ps_data, by = "Gene")
+  
+  # Get top 3 genes per phylostrata by adjusted p-value
+  top_genes <- de_merged %>%
+    filter(p_val_adj < 0.05) %>%
+    group_by(Phylostrata) %>%
+    arrange(p_val_adj) %>%
+    slice_head(n = 3) %>%
+    pull(Gene) %>%
+    unique()
+  
+  # Skip if no top genes
+  if (length(top_genes) == 0) next
+  
+  # Subset Seurat object for that tissue
+  seurat_sub <- subset(combined_seurat, subset = tissue == tis)
+  
+  # Get expression + metadata
+  expr_data <- FetchData(seurat_sub, vars = c(top_genes, "age"))
+  expr_data$cell_id <- rownames(expr_data)
+  expr_long <- reshape2::melt(expr_data, id.vars = c("age", "cell_id"), 
+                              variable.name = "Gene", value.name = "Expression")
+  
+  # Add phylostrata info
+  expr_long <- left_join(expr_long, ps_data, by = "Gene")
+  
+  # Plot
+  p <- ggplot(expr_long, aes(x = age, y = Expression, fill = age)) +
+    geom_boxplot(outlier.size = 0.3) +
+    facet_wrap(~ paste0("PS", Phylostrata, ": ", Gene), scales = "free_y", ncol = 3) +
+    labs(title = paste("Top DE Genes by Phylostrata in", tis),
+         x = "Age", y = "Expression") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.text = element_text(size = 8),
+          legend.position = "none")
+  
+  print(p)
+  
+  #Optionally save
+  #ggsave(paste0("Boxplot_DE_Phylostrata_", tis, ".pdf"), plot = p, width = 10, height = 8)
+}
+```
+	
+
+
+```{r}
+#PLOT 1: Phylostrata plots 
+
+# Prepare phylostrata data
+ps_data <- combined_seurat[["RNA"]]@misc$Phylostrata
+ps_data <- as.data.frame(ps_data)
+colnames(ps_data) <- "Phylostrata"
+ps_data$Gene <- rownames(ps_data)
+
+# Loop through each tissue
+for (tis in names(de_results_list)) {
+  cat("Phylostrata plot for:", tis, "\n")
+  
+  de_res <- de_results_list[[tis]]
+  
+  # Identify genes upregulated in 3m and 24m
+  up_in_3m <- rownames(de_res[de_res$avg_log2FC > 0 & de_res$p_val_adj < 0.05, ])
+  up_in_24m <- rownames(de_res[de_res$avg_log2FC < 0 & de_res$p_val_adj < 0.05, ])
+  
+  # Merge with Phylostrata and assign age group
+  df_3m <- ps_data[ps_data$Gene %in% up_in_3m, , drop = FALSE]
+  df_3m$Age <- "3m"
+  df_24m <- ps_data[ps_data$Gene %in% up_in_24m, , drop = FALSE]
+  df_24m$Age <- "24m"
+  
+  combined_df <- rbind(df_3m, df_24m)
+  combined_df$Age <- factor(combined_df$Age, levels = c("3m", "24m"))
+  
+  if (nrow(combined_df) > 0) {
+    # Improved plot
+    p <- ggplot(combined_df, aes(x = factor(Phylostrata), fill = Age)) +
+      geom_bar(position = position_dodge(width = 0.8), width = 0.7) +
+      scale_fill_manual(
+        values = c("3m" = "deeppink", "24m" = "deepskyblue"),
+        breaks = c("3m", "24m")
+      ) +
+      labs(
+        title = paste("Phylostratigraphic Distribution of Differentially Expressed \nGenes at 3m vs 24m:", tis),
+        x = "Phylostrata",
+        y = "Gene Count",
+        fill = "Age Group"
+      ) +
+theme_minimal(base_size = 12) +
+theme(
+  plot.title = element_text(
+    size = 14,
+    face = "bold",
+    hjust = 0.5,
+    margin = margin(t = 10, b = 10)  # adds space above and below title
+  ),
+  plot.margin = margin(t = 20, r = 20, b = 20, l = 20),  # adds space around entire plot
+  axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+  axis.text.y = element_text(size = 10),
+  axis.title = element_text(size = 12),
+  legend.title = element_text(size = 11),
+  legend.text = element_text(size = 10)
+)
+    
+    print(p)
+  }
+}
+```
+
+
+
+```{r}
+# Load libraries
+library(ggplot2)
+library(patchwork)  # for safe panel layout
+
+# Step 1: Select tissues to panel
+panel_tissues <- c("Large_Intestine", "Thymus", "Spleen")
+
+# Step 2: Extract the plots from volcano_list
+panel_plots <- volcano_list[panel_tissues]
+
+# Step 3: Combine the plots using patchwork
+final_plot <- panel_plots[[1]] + panel_plots[[2]] + panel_plots[[3]] +
+  plot_layout(ncol = 3) +
+  plot_annotation(tag_levels = "A")  # Adds A, B, C tags
+
+# Step 4: Print to viewer (or save)
+print(final_plot)
+
+# Optional: Save to file
+ggsave("volcano_panel_plot.pdf", final_plot, width = 15, height = 5)
+```
+
+
+
+
+
+
+```{r}
+# Load libraries
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(patchwork)  # for clean figure layout
+
+# Define tissues to panel
+panel_tissues <- c("Large_Intestine", "Thymus", "Spleen")
+
+# Extract phylostrata from Seurat object
+phylostrata_raw <- combined_seurat[["RNA"]]@misc$Phylostrata
+phylostrata_df <- if (is.null(dim(phylostrata_raw))) {
+  data.frame(
+    gene = names(phylostrata_raw),
+    phylostratum = as.integer(phylostrata_raw)
+  )
+} else {
+  data.frame(
+    gene = rownames(phylostrata_raw),
+    phylostratum = as.integer(phylostrata_raw[, 1])
+  )
+}
+
+# Create a list to store plots
+volcano_list <- list()
+
+# Loop through tissues and generate plots
+for (tis in names(de_results_list)) {
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) next
+
+  de_res$gene <- rownames(de_res)
+  de_res$log10_padj <- -log10(de_res$p_val_adj + 1e-300)
+  de_res$significant <- with(de_res, p_val_adj < 0.05 & abs(avg_log2FC) > 0.25)
+  de_res$direction <- "Not Significant"
+  de_res$direction[de_res$significant & de_res$avg_log2FC > 0] <- "Upregulated in 3m"
+  de_res$direction[de_res$significant & de_res$avg_log2FC < 0] <- "Upregulated in 24m"
+
+  # Add phylostrata info
+  de_res <- merge(de_res, phylostrata_df, by = "gene", all.x = TRUE)
+  de_res$label <- paste0(de_res$gene, " (PS", de_res$phylostratum, ")")
+
+  # Top 5 genes from each group
+  top_up_24m <- de_res %>% filter(direction == "Upregulated in 24m") %>% arrange(p_val_adj) %>% head(5)
+  top_up_3m  <- de_res %>% filter(direction == "Upregulated in 3m")  %>% arrange(p_val_adj) %>% head(5)
+  top_genes <- bind_rows(top_up_24m, top_up_3m)
+
+    # Volcano plot
+  p <- ggplot(de_res, aes(x = avg_log2FC, y = log10_padj)) +
+    geom_point(aes(color = direction), alpha = 0.6) +
+    geom_text_repel(data = top_genes, aes(label = label), size = 3, max.overlaps = 15) +
+    scale_color_manual(values = c(
+      "Upregulated in 3m" = "deeppink",
+      "Upregulated in 24m" = "skyblue",
+      "Not Significant" = "grey"
+    )) +
+    geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed", color = "blue", linewidth = 0.3) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue", linewidth = 0.3) +
+    coord_cartesian(ylim = c(0, 320)) +
+    labs(
+      title = paste0("Differential Gene Expression in ", tis, "\n(3m vs 24m)"),
+      x = expression("Log"["2"]*" Fold Change (3m vs 24m)"),
+      y = expression(-Log[10]~Adjusted~P-value),
+      color = "Expression Direction"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom",
+      plot.margin = margin(10, 10, 10, 15)
+    )
+
+  volcano_list[[tis]] <- p
+}
+
+# Extract only selected tissue plots
+panel_plots <- volcano_list[panel_tissues]
+
+# Combine with patchwork, stacked vertically
+final_plot <- (panel_plots[[1]] / panel_plots[[2]] / panel_plots[[3]]) +
+  plot_annotation(tag_levels = "A") &
+  theme(legend.position = "bottom")
+
+# Save to file
+ggsave("volcano_panels_stacked.pdf", final_plot, width = 7, height = 12)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(patchwork)
+
+# Prepare phylostrata data
+ps_data <- combined_seurat[["RNA"]]@misc$Phylostrata
+ps_data <- as.data.frame(ps_data)
+colnames(ps_data) <- "Phylostrata"
+ps_data$Gene <- rownames(ps_data)
+
+# Choose tissues
+panel_tissues <- c("Large_Intestine", "Thymus", "Spleen")
+
+# Store plots
+ps_plot_list <- list()
+
+# Generate and store plots for selected tissues
+for (tis in panel_tissues) {
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res)) next
+  
+  up_in_3m <- rownames(de_res[de_res$avg_log2FC > 0 & de_res$p_val_adj < 0.05, ])
+  up_in_24m <- rownames(de_res[de_res$avg_log2FC < 0 & de_res$p_val_adj < 0.05, ])
+  
+  df_3m <- ps_data[ps_data$Gene %in% up_in_3m, , drop = FALSE]
+  df_3m$Age <- "3m"
+  df_24m <- ps_data[ps_data$Gene %in% up_in_24m, , drop = FALSE]
+  df_24m$Age <- "24m"
+  
+  combined_df <- rbind(df_3m, df_24m)
+  combined_df$Age <- factor(combined_df$Age, levels = c("3m", "24m"))
+  
+  if (nrow(combined_df) > 0) {
+    p <- ggplot(combined_df, aes(x = factor(Phylostrata), fill = Age)) +
+      geom_bar(position = position_dodge(width = 0.8), width = 0.7) +
+      scale_fill_manual(
+        values = c("3m" = "deeppink", "24m" = "deepskyblue"),
+        breaks = c("3m", "24m")
+      ) +
+      labs(
+        title = paste0("Phylostratigraphic Distribution of DEGs in ", tis, " (3m vs 24m)"),
+        x = "Phylostrata",
+        y = "Gene Count",
+        fill = "Age Group"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.margin = margin(10, 10, 10, 10),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom"
+      )
+    
+    ps_plot_list[[tis]] <- p
+  }
+}
+
+# Combine plots vertically using patchwork
+final_stack <- ps_plot_list[[1]] / ps_plot_list[[2]] / ps_plot_list[[3]] +
+  plot_annotation(tag_levels = "A")  # Optional panel tags
+
+
+# Optional: Save
+ggsave("stacked_phylostrata_barplots.pdf", final_stack, width = 8, height = 12)
+```
+
+
+
+
+
+
+
+
+```{r}
+# Get versions of all loaded packages
+pkg_versions <- data.frame(
+  Package = loadedNamespaces(),
+  Version = sapply(loadedNamespaces(), function(pkg) as.character(packageVersion(pkg))),
+  stringsAsFactors = FALSE
+)
+
+# View it in console
+print(pkg_versions)
+View(pkg_versions)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+```
+
+
+
+Part 4: GO Enrichment After Tissue-Wise DE Analysis
+```{r}
+#Conduct GO enrichment for 24m upregulated DEGs 
+
+# Function to map gene symbols to Entrez IDs and remove unmapped genes
+map_and_filter_genes <- function(genes) {
+  entrez_ids <- suppressMessages(
+    mapIds(org.Mm.eg.db, keys = genes, column = "ENTREZID", keytype = "SYMBOL", multiVals = "first")
+  )
+  filtered_genes <- na.omit(entrez_ids)
+  return(filtered_genes)
+}
+
+# Loop over tissues for GO enrichment and plotting
+for (tis in names(de_results_list)) {
+  
+  cat("Processing tissue:", tis, "\n")
+  
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) next
+  
+  # Select genes upregulated in 24m
+  genes_up_24m <- de_res %>%
+    filter(avg_log2FC < 0, p_val_adj < 0.05) %>%
+    rownames()
+  
+  # Map to Entrez IDs and filter out NAs
+  entrez_genes <- map_and_filter_genes(genes_up_24m)
+  if (length(entrez_genes) < 5) {
+    cat("Too few mapped genes for GO enrichment in", tis, "- skipping\n")
+    next
+  }
+  
+  # GO enrichment for Biological Processes
+  ego_bp <- enrichGO(
+    gene = entrez_genes,
+    OrgDb = org.Mm.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE
+  )
+  
+  if (is.null(ego_bp) || nrow(ego_bp) == 0) {
+    cat("No significant GO BP terms for", tis, "\n")
+    next
+  }
+
+  # Default barplot (colour = p.adjust)
+  print(
+    barplot(ego_bp, showCategory = 10, title = paste("GO Biological Process Enrichment (24m Upregulated Genes):  -", tis)) +
+      theme_minimal(base_size = 12)
+  )
+  
+  # Default dotplot (colour = p.adjust, size = gene count)
+  print(
+    dotplot(ego_bp, showCategory = 10, title = paste("GO Biological Process Enrichment (24m Upregulated Genes):  -", tis)) +
+      theme_minimal(base_size = 12)
+  )
+}
+
+```
+
+
+```{r}
+# Load required libraries
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(patchwork)
+
+# Function to map gene symbols to Entrez IDs and remove unmapped genes
+map_and_filter_genes <- function(genes) {
+  entrez_ids <- suppressMessages(
+    mapIds(org.Mm.eg.db, keys = genes, column = "ENTREZID", keytype = "SYMBOL", multiVals = "first")
+  )
+  filtered_genes <- na.omit(entrez_ids)
+  return(filtered_genes)
+}
+
+# Define tissues of interest
+selected_tissues <- c("Large_Intestine", "Thymus", "Spleen")
+dotplot_list <- list()  # Store individual plots
+
+# Loop over tissues
+for (tis in selected_tissues) {
+  
+  cat("Processing tissue:", tis, "\n")
+  
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) {
+    cat("No DE results for", tis, "- skipping\n")
+    next
+  }
+  
+  # Get genes upregulated in 24-month mice
+  genes_up_24m <- de_res %>%
+    filter(avg_log2FC < 0, p_val_adj < 0.05) %>%
+    rownames()
+  
+  # Map to Entrez IDs
+  entrez_genes <- map_and_filter_genes(genes_up_24m)
+  if (length(entrez_genes) < 5) {
+    cat("Too few mapped genes for GO enrichment in", tis, "- skipping\n")
+    next
+  }
+  
+  # Perform GO enrichment
+  ego_bp <- enrichGO(
+    gene = entrez_genes,
+    OrgDb = org.Mm.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE
+  )
+  
+  if (is.null(ego_bp) || nrow(ego_bp) == 0) {
+    cat("No significant GO BP terms for", tis, "\n")
+    next
+  }
+  
+  # Generate styled dotplot
+  plot_title <- paste("GO Biological Process Enrichment\n", gsub("_", " ", tis), "(24m)")
+  p <- dotplot(ego_bp, showCategory = 10, title = plot_title) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.key.size = unit(0.4, "cm"),       # shrink key boxes
+      legend.title = element_text(size = 9),   # smaller title
+      legend.text = element_text(size = 8),    # smaller labels
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 12, margin = margin(b = 8))
+    )
+  
+  # Save to list
+  dotplot_list[[tis]] <- p
+}
+
+# Combine selected plots using patchwork
+if (all(selected_tissues %in% names(dotplot_list))) {
+  combined_plot <- (dotplot_list[[selected_tissues[1]]] /
+                    dotplot_list[[selected_tissues[2]]] /
+                    dotplot_list[[selected_tissues[3]]]) +
+    plot_annotation(tag_levels = "A")
+  
+  # Display
+  print(combined_plot)
+  
+  # Save
+  ggsave("GO_dotplots_24m_upregulated.pdf", combined_plot, width = 7, height = 12)
+} else {
+  warning("Some selected tissues did not return valid dotplots.")
+}
+```
+
+
+```{r}
+#Identification of ALL Significant Age-Associated DEGs Annotated by Evolutionary Origin
+
+# Load DE results and phylostrata
+de_results_list <- readRDS("de_results_list.rds")
+phylostrata_df <- as.data.frame(combined_seurat[["RNA"]]@misc$Phylostrata)
+phylostrata_df$Gene <- rownames(phylostrata_df)
+
+# Initialise list
+combined_sig_de_list <- list()
+
+# Loop through each tissue
+for (tis in names(de_results_list)) {
+  
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) next
+  
+  # Add gene column
+  de_res$Gene <- rownames(de_res)
+  
+  # Filter for significant genes only
+  de_res_sig <- de_res %>%
+    filter(p_val_adj < 0.05) %>%
+    select(Gene, avg_log2FC, p_val_adj) %>%
+    mutate(Tissue = tis)
+  
+  # Add direction
+  de_res_sig <- de_res_sig %>%
+    mutate(direction = ifelse(avg_log2FC > 0, "Up in 3m", "Up in 24m"))
+  
+  # Merge phylostrata
+  de_merged <- left_join(de_res_sig, phylostrata_df, by = "Gene")
+  colnames(de_merged)[colnames(de_merged) == "Phylostrata"] <- "phylostrata"
+  
+  # Add to list
+  combined_sig_de_list[[tis]] <- de_merged
+}
+
+# Combine all into one dataframe
+combined_sig_de_all <- bind_rows(combined_sig_de_list)
+
+# View top rows
+head(combined_sig_de_all)
+
+# Save to CSV
+write.csv(combined_sig_de_all, "significant_DE_genes_all_tissues.csv", row.names = FALSE)
+```
+
+
+
+
+FIX THIS ONE!!! 
+
+
+```{r}
+# Load required libraries
+# Load required libraries
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(dplyr)
+library(enrichplot)
+library(tidyr)
+library(forcats)
+library(AnnotationDbi)
+
+# Function to map gene symbols to Entrez IDs and remove unmapped genes
+map_and_filter_genes <- function(genes) {
+  entrez_ids <- mapIds(org.Mm.eg.db, keys = genes, column = "ENTREZID", keytype = "SYMBOL", multiVals = "first")
+  filtered_genes <- na.omit(entrez_ids)
+  return(filtered_genes)
+}
+
+# Prepare phylostrata dataframe
+phylostrata_raw <- combined_seurat[["RNA"]]@misc$Phylostrata
+phylostrata_df <- if (is.null(dim(phylostrata_raw))) {
+  data.frame(gene = names(phylostrata_raw),
+             phylostratum = as.integer(phylostrata_raw),
+             stringsAsFactors = FALSE)
+} else {
+  data.frame(gene = rownames(phylostrata_raw),
+             phylostratum = as.integer(phylostrata_raw[, 1]),
+             stringsAsFactors = FALSE)
+}
+
+# Loop through tissues
+for (tis in names(de_results_list)) {
+  cat("Processing tissue:", tis, "\n")
+  
+  de_res <- de_results_list[[tis]]
+  if (is.null(de_res) || nrow(de_res) == 0) next
+  
+  # Get genes upregulated in 24m
+  genes_up_24m <- rownames(de_res %>% filter(avg_log2FC < 0, p_val_adj < 0.05))
+  if (length(genes_up_24m) < 5) {
+    cat("Too few genes for GO enrichment in", tis, "- skipping\n")
+    next
+  }
+  
+  # Map to Entrez IDs
+  entrez_genes <- map_and_filter_genes(genes_up_24m)
+  if (length(entrez_genes) < 5) {
+    cat("Too few mapped Entrez IDs for", tis, "- skipping\n")
+    next
+  }
+  
+  # GO enrichment for Biological Process
+  ego_bp <- enrichGO(
+    gene = entrez_genes,
+    OrgDb = org.Mm.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE
+  )
+  
+  if (is.null(ego_bp) || nrow(ego_bp) == 0) {
+    cat("No significant GO terms for", tis, "\n")
+    next
+  }
+  
+  # Parse geneID field (symbols, already readable)
+  gene2go <- setNames(ego_bp@result$geneID, ego_bp@result$ID)
+  
+  go_gene_df <- tibble(
+    GO = rep(names(gene2go), lengths(strsplit(gene2go, "/"))),
+    Symbol = unlist(strsplit(gene2go, "/"))
+  )
+  
+  # Join phylostrata annotation by SYMBOL
+  go_gene_df <- go_gene_df %>%
+    left_join(phylostrata_df, by = c("Symbol" = "gene"))
+  
+  # Summarise gene count per GO term and phylostratum
+  go_phylostratum_counts <- go_gene_df %>%
+    group_by(GO, phylostratum) %>%
+    summarise(count = n(), .groups = "drop")
+  
+  # Select top 10 GO terms for display
+  top_go_terms <- ego_bp@result %>%
+    arrange(p.adjust) %>%
+    slice_head(n = 10) %>%
+    pull(ID)
+  
+  plot_data <- go_phylostratum_counts %>%
+    filter(GO %in% top_go_terms) %>%
+    mutate(GO = factor(GO, levels = rev(top_go_terms)))
+  
+  # --- BARPLOT ---
+  p_bar <- ggplot(plot_data, aes(x = GO, y = count, fill = factor(phylostratum))) +
+    geom_col(position = position_stack()) +
+    coord_flip() +
+    labs(
+      title = paste("GO Biological Process Enrichment by Phylostrata in", tis),
+      x = "GO Term",
+      y = "Number of Genes",
+      fill = "Phylostratum"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", margin = margin(b = 8))
+    )
+  print(p_bar)
+  
+  # --- DOTPLOT ---
+  gene_counts_per_go <- dplyr::filter(ego_bp@result, ID %in% top_go_terms) %>%
+  dplyr::select(ID, GeneRatio)
+  
+  gene_ratios <- sapply(gene_counts_per_go$GeneRatio, function(x) eval(parse(text = x)))
+  
+  plot_data <- plot_data %>%
+    left_join(gene_counts_per_go, by = c("GO" = "ID")) %>%
+    mutate(GeneRatioNum = gene_ratios[match(GO, gene_counts_per_go$ID)],
+           Ratio = count / (GeneRatioNum * 100))  # crude scaling
+  
+  plot_title <- paste("GO Enrichment Dotplot by Phylostrata in", tis)
+  
+  p_dot <- ggplot(plot_data, aes(x = GO, y = factor(phylostratum), size = count, color = Ratio)) +
+    geom_point() +
+    scale_color_gradient(low = "purple", high = "lightblue") +
+    labs(
+      title = plot_title,
+      x = "GO Term",
+      y = "Phylostratum",
+      color = "Gene Ratio",
+      size = "Gene Count"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.key.size = unit(0.4, "cm"),
+      legend.title = element_text(size = 9),
+      legend.text = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 12, margin = margin(b = 8))
+    )
+  
+  print(p_dot)
+}
+```
+
+
