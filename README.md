@@ -2,6 +2,7 @@
 
 This repository contains the full workflow and codebase for analysing age-related gene expression changes across phylostrata using the Smart-seq2 FACS subset of the Tabula Muris Senis (TMS) single-cell RNA-sequencing dataset.
 
+
 ## Project Overview
 
 This project investigates how genes of different evolutionary ages are differentially expressed during ageing in mice. Using phylostratigraphy, single-cell transcriptomics, and differential expression analysis, it explores tissue-specific transcriptional trends between 3-month-old (young adult) and 24-month-old (aged) mice.
@@ -27,14 +28,14 @@ TMS_FACS_Phylostratigraphy/
 └── TMS_FACS_Phylostratigraphy.Rproj  # RStudio project file
 
 
-## Script
+## Script Description
 	•	TMS_FACS_Phylostrata_analysis.R:
-This single R script performs the complete analysis pipeline, including:
-	•	Data loading and formatting
-	•	Quality control and normalisation
-	•	Dimensionality reduction and batch correction
-	•	Differential expression testing
-	•	Visualisation of phylostrata trends and GO enrichment
+    This single R script performs the complete analysis pipeline, including:
+    	•	Data loading and formatting
+    	•	Quality control and normalisation
+    	•	Dimensionality reduction and batch correction
+    	•	Differential expression testing
+    	•	Visualisation of phylostrata trends and GO enrichment
 	
 ## Dependencies
 
@@ -48,9 +49,9 @@ This project was developed using R version 4.3.3 within a containerised environm
 	•	data.table, dplyr, tidyr – Efficient data manipulation
 	•	scDblFinder – Doublet detection using batch-aware modelling
 
-All dependencies are managed within a Docker/Singularity container. This ensures reproducibility across environments.
+All dependencies are managed via a Docker or Singularity container for full reproducibility.
 
-##Docker Image
+## Docker Image
 
 This project is containerised for reproducibility and ease of use.
 
@@ -61,23 +62,36 @@ You can use the pre-built image from Docker Hub:[madihakhan/tsm_pheno_analysis](
 1. Pull the image: (if not already downloaded):
    ```bash
    docker pull madihakhan/tsm_pheno_analysis:latest
-   
+   ```
 2. Run the container with RStudio Server
-   Set your own password (used to log in to RStudio):
+   Set your OWN password (used to log in to RStudio):
 
    ```bash
    docker run -e PASSWORD=yourpassword -p 8787:8787 madihakhan/tsm_pheno_analysis:latest
-
+   ```
 3.	Access RStudio in your browser:
-    •	Open: http://localhost:8787
-    	•	Username: rstudio (all lowercase)
-    	•	Password: yourpassword (whatever you saved it as from step 2)
+- Open: [http://localhost:8787](http://localhost:8787)  
+- Username: `rstudio`  
+- Password: `yourpassword` (from step 2)
 
+## Running the Analysis
 
-## How to Reproduce repository 
-
-1. Clone this repo:
+1. **Clone this repository**:
    ```bash
    git clone https://github.com/mads9797/TMS_FACS_Phylostratigraphy.git
+   cd TMS_FACS_Phylostratigraphy
+  ```
    
+2.	Follow the Docker setup in the Docker Image section above to run the containerised environment.
+
+3. Run the main script in RStudio (after following bash steps):
+   ```R
+   source("scripts/TMS_FACS_Phylostrata_analysis.R")
+  ```	
+
+### Author
+
+Madiha Khan  
+MSc Bioinformatics, King's College London  
+GitHub: [@mads9797](https://github.com/mads9797)
    
