@@ -16,14 +16,14 @@ This project investigates how genes of different evolutionary ages are different
 
 
 ## Repository Structure
-
-**TMS_FACS_Phylostratigraphy/**
-**├── data/                    # Raw data files**
-**├── scripts/                 # R scripts for each step of the pipeline**
-**├── results/                 # DE output, plots, GO enrichment results**
-**├── README.md                # Project description and usage**
-**└── TMS_FACS_Phylostratigraphy.Rproj  # RStudio project file**
-
+```
+TMS_FACS_Phylostratigraphy/**
+├── data/                    # Raw data files
+├── scripts/                 # R scripts for each step of the pipeline
+├── results/                 # DE output, plots, GO enrichment results
+├── README.md                # Project description and usage
+└── TMS_FACS_Phylostratigraphy.Rproj  # RStudio project file
+```
 
 ## Script Description
 
