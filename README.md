@@ -14,9 +14,6 @@ This project investigates how genes of different evolutionary ages are different
 - **MGIBatchReport_20250628_152059.txt**: An intermediate file generated using MGI’s batch ortholog tool to map mouse gene symbols to human Ensembl IDs. This file supports the phylostrata annotation process and is included for full reproducibility.
 - All data used is publicly available.
 
-## Reproducibility
-
-All code is containerised (Docker/Singularity) and version-controlled using Git. The repository is structured to support reproducible and transparent research
 
 ## Repository Structure
 
@@ -81,7 +78,6 @@ You can use the pre-built image from Docker Hub:[madihakhan/tsm_pheno_analysis](
    git clone https://github.com/mads9797/TMS_FACS_Phylostratigraphy.git
    cd TMS_FACS_Phylostratigraphy
   ```
-   
 2.	Follow the Docker setup in the Docker Image section above to run the containerised environment.
 
 3. Run the main script in RStudio (after following bash steps):
