@@ -21,7 +21,6 @@ This project was conducted as part of my MSc Bioinformatics dissertation at King
 TMS_FACS_Phylostratigraphy/**
 ├── data/                    # Raw data files
 ├── scripts/                 # R scripts for each step of the pipeline
-├── results/                 # DE output, plots, GO enrichment results
 ├── README.md                # Project description and usage
 └── TMS_FACS_Phylostratigraphy.Rproj  # RStudio project file
 ```
