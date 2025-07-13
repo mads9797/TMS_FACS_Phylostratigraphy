@@ -24,7 +24,6 @@ TMS_FACS_Phylostratigraphy/
 ├── README.md                # Project description and usage
 └── TMS_FACS_Phylostratigraphy.Rproj  # RStudio project file
 
-
 ## Script Description
 TMS_FACS_Phylostrata_analysis.R: This single R script performs the complete analysis pipeline, including:
     	•	Data loading and formatting
