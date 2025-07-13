@@ -36,15 +36,18 @@ TMS_FACS_Phylostratigraphy/
 	
 ## Dependencies
 
-This project was developed using R version 4.3.3 within a containerised environment. Key dependencies include:
-	•	Seurat – Single-cell data integration, QC, normalisation, clustering
-	•	MAST – Differential expression analysis for single-cell data
-	•	Harmony – Batch correction across experimental conditions
-	•	clusterProfiler – Gene Ontology (GO) enrichment analysis
-	•	ggplot2, ggrepel, patchwork – Custom data visualisation
-	•	gprofiler2 – Ortholog and phylostrata mapping
-	•	data.table, dplyr, tidyr – Efficient data manipulation
-	•	scDblFinder – Doublet detection using batch-aware modelling
+This project was developed using R version 4.3.3 within a containerised environment.
+
+Key dependencies include:
+
+- **Seurat** – Single-cell data integration, QC, normalisation, clustering  
+- **MAST** – Differential expression analysis for single-cell data  
+- **Harmony** – Batch correction across experimental conditions  
+- **clusterProfiler** – Gene Ontology (GO) enrichment analysis  
+- **ggplot2**, **ggrepel**, **patchwork** – Custom data visualisation  
+- **gprofiler2** – Ortholog and phylostrata mapping  
+- **data.table**, **dplyr**, **tidyr** – Efficient data manipulation  
+- **scDblFinder** – Doublet detection using batch-aware modelling  
 
 All dependencies are managed via a Docker or Singularity container for full reproducibility.
 
