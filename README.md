@@ -84,10 +84,11 @@ You can use the pre-built image from Docker Hub:[madihakhan/tsm_pheno_analysis](
    git clone https://github.com/mads9797/TMS_FACS_Phylostratigraphy.git
    cd TMS_FACS_Phylostratigraphy
   ```
+  ```
 2.	Follow the Docker setup in the Docker Image section above to run the containerised environment.
-
+  ```
+  ```
 3. Run the main script in RStudio (after following bash steps):
-   ```R
    source("scripts/TMS_FACS_Phylostrata_analysis.R")
   ```	
 
