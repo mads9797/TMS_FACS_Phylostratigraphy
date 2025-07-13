@@ -26,7 +26,7 @@ TMS_FACS_Phylostratigraphy/
 
 
 ## Script Description
-	•	TMS_FACS_Phylostrata_analysis.R: This single R script performs the complete analysis pipeline, including:
+TMS_FACS_Phylostrata_analysis.R: This single R script performs the complete analysis pipeline, including:
     	•	Data loading and formatting
     	•	Quality control and normalisation
     	•	Dimensionality reduction and batch correction
