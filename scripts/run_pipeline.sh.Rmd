@@ -1,7 +1,7 @@
 ---
 title: "run_pipeline.sh"
 output: html_document
-date: "2025-07-13"
+date: "2025-03-07"
 ---
 
 Part 1: Making environment + setting up working directory 
@@ -194,27 +194,38 @@ library(ggplot2)          # General-purpose plotting
 library(ggrepel)          # Improved text labels for ggplot2
 library(pheatmap)         # Heatmaps for expression patterns
 library(reshape2)         # Data reshaping
-library(patchwork)        # For vertical stacking of plots (plot rendering)
+library(patchwork)        # For stacking plots
 
 #Genomic data access and annotation
 library(biomaRt)          # Interface to Ensembl via BioMart
 library(GenomeInfoDb)     # Chromosome and genome metadata
 
-#Single cell RNA-seq analysis
+#Single-cell RNA-seq analysis
 library(Seurat)         # Main toolkit for scRNA-seq analysis
 library(SeuratObject)   # Underlying data structure for Seurat
 library(harmony)        # Batch effect correction and integration
 library(scDblFinder)    # Detecting and removing doublets in single-cell data
-library(MAST)           # Differential expression tailored for scRNA-seq
+library(MAST)            # Differential expression tailored for scRNA-seq
 
 #Functional Enrichment & Pathway Analysis
 library(clusterProfiler)  # GO/KEGG enrichment
 library(gprofiler2)       # Interface to g:Profiler
 library(org.Mm.eg.db)     # Mouse genome annotations
 library(AnnotationDbi)    # Annotation DB interface
-library(enrichplot)       # Visualisation of enrichment results
 ```
 
+```{r}
+# Confirm versions of all loaded packages
+pkg_versions <- data.frame(
+  Package = loadedNamespaces(),
+  Version = sapply(loadedNamespaces(), function(pkg) as.character(packageVersion(pkg))),
+  stringsAsFactors = FALSE
+)
+
+# View it in console
+print(pkg_versions)
+
+```
 
 
 
@@ -790,6 +801,8 @@ sftp -i~/.ssh/panda k24090847@hpc.create.kcl.ac.uk
 put /Users/madihakhan/Desktop/MGIBatchReport_20250628_152059.txt /users/k24090847/TMS_JUNE_4.6
 
 #Key column in this file: MGI Gene/Marker ID, Ensembl ID (e.g., ENSMUSG00000109644), Symbol (e.g., 0610005C13Rik, Atraid)
+
+#To ensure reproducibility of this manual mapping step, the output file has been included in the project repository. It is available as #`MGIBatchReport_20250628_152059.txt` in the `TMS_FACS_Phylostratigraphy/data/` directory.
 ```
 
 
@@ -970,28 +983,9 @@ nrow(full_gene_list) - nrow(filtered_full_gene_list)  # Number of Rik-containing
 ```
 
 
-```{r}
-# Step 6: Load Ortholog Mapping File from gprofiler2    #15352
-orthologs <- read_csv("~/human_to_orthologs.csv")
-#View(orthologs)
-
-# Assess Gene Counts Across Datasets: Total genes in each dataset
-n_genes_gene_list <- length(unique(full_gene_list$Gene))
-n_genes_orthologs <- length(unique(orthologs$ortholog_name))
-
-# Number of shared genes = 13431
-shared_genes <- intersect(full_gene_list$Gene, orthologs$ortholog_name)
-n_shared_genes <- length(shared_genes)
-
-# Report Summary Statistics
-cat("Mouse gene list contains:", n_genes_gene_list, "genes\n")                            #= 22899
-cat("Orthologs file contains:", n_genes_orthologs, "mouse genes via human orthologs\n")   #= 15352
-cat("Number of genes shared between the two:", n_shared_genes, "\n")                     #= 13431
-```
-
 
 ```{r}
-# Step 7: Map Mouse Genes to Human Orthologs
+# Step 6: Map Mouse Genes to Human Orthologs
 
 
 #Preview selected columns using dplyr::select to avoid naming conflicts
@@ -1019,7 +1013,7 @@ cat("Mapping rate:", round(100 * n_mapped / n_total, 2), "%\n")
 
 
 ```{r}
-# Step 8: Load the phylostrata file you uploaded earlier
+# Step 7: Load the phylostrata file you uploaded earlier
 phylostrata <- read_csv("~/gene_phylostrata.csv")
 #View(phylostrata)
 
@@ -1042,7 +1036,7 @@ phylomap_1 <- mapped_genes2.2 %>%
 
 
 ```{r}
-#STEP 9: Add Phylostrata Annotations to Seurat Object (Part A: Gene Symbols / non-RIK IDs)
+#STEP 8: Add Phylostrata Annotations to Seurat Object (Part A: Gene Symbols / non-RIK IDs)
 
 #Create Named Vector (RIK Symbol → Phylostrata)
 phylostrata_vec_1 <- setNames(phylomap_1$Phylostrata, phylomap_1$Gene)
@@ -1114,12 +1108,11 @@ The code keeps the first row it encounters, but the “first” row may not be t
 If the Seurat object rows correspond to specific gene isoforms or annotations not captured by the filtered distinct rows, merging could cause mismatches or missing data.
 
 Summary:
-This step is a pragmatic solution to handle duplicates to allow for unique rownames (required by Seurat). 
-However, it sacrifices the richness of duplicated data and assumes all duplicates are equivalent, which might not always hold biologically. 
+This step is a pragmatic solution to handle duplicates to allow for unique rownames. However, it sacrifices the richness of duplicated data and assumes all duplicates are equivalent, which might not always hold biologically. 
 
 	
 ```{r}
-#STEP 10: Add Phylostrata to Seurat Object Metadata: part b (RidIDs)
+#STEP 9: Add Phylostrata to Seurat Object Metadata: part b (RidIDs)
 
 #Read in the mapping (RIK → Phylostrata)
 phylomap_2 <- read.csv("~/final_Rik_mapped_phylostrata.csv", stringsAsFactors = FALSE)
@@ -1163,7 +1156,7 @@ seurat_subset_2[["RNA"]]@misc$Phylostrata <- phylomap_with_gene_2 %>%
 
 
 ```{r}
-#Step 11: Combining Gene Sets and Merging Phylostrata Metadata Across Seurat Subsets
+#Step 10: Combining Gene Sets and Merging Phylostrata Metadata Across Seurat Subsets
 
 # Combine gene lists (unique genes from both subsets)
 combined_genes <- union(rownames(seurat_subset_1), rownames(seurat_subset_2))
@@ -1199,7 +1192,7 @@ View(combined_seurat[["RNA"]]@misc$Phylostrata)
 
 
 
-PART 3: Differential Expression 
+PART 5: Differential Expression 
 
 ```{r}
 ##Step 1: CHECK DISTRIBUTION OF Genes with mapped phylostata: checking for phylostrata bias 
@@ -1213,44 +1206,47 @@ phylostrata_df <- phylostrata_df %>%
 # Check structure
 head(phylostrata_df)
 ```
-```{r}
 
-# Step 1: Extract phylostrata metadata safely
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+# Extract and clean Phylostrata info
 phylostrata_df <- combined_seurat[["RNA"]]@misc$Phylostrata %>%
   as.data.frame() %>%
   rownames_to_column("Gene")
 
-# Step 2: Ensure the Phylostrata column is a clean character vector, then numeric
-phylostrata_df$Phylostrata <- as.character(phylostrata_df$Phylostrata)
+colnames(phylostrata_df)[2] <- "Phylostrata"
+
 phylostrata_df <- phylostrata_df %>%
   filter(!is.na(Phylostrata)) %>%
-  mutate(Phylostrata = as.numeric(Phylostrata))   # Now numeric
+  mutate(Phylostrata = as.numeric(as.character(Phylostrata)))
 
-# Step 3: Count genes per phylostratum
+# Count genes per phylostratum
 phylostrata_counts <- phylostrata_df %>%
   group_by(Phylostrata) %>%
-  summarise(NumGenes = n()) %>%
-  arrange(Phylostrata)
+  summarise(GeneCount = n())
 
-# Step 4: Plot
-ggplot(phylostrata_counts, aes(x = factor(Phylostrata), y = NumGenes, fill = Phylostrata)) +
-  geom_bar(stat = "identity", colour = "black", width = 0.8) +
-  geom_text(aes(label = NumGenes), vjust = -0.4, size = 3.5) +
-  scale_fill_gradient(low = "#4CBB17", high = "#FF55A3") +
+# Plot with count labels
+ggplot(phylostrata_counts, aes(x = factor(Phylostrata), y = GeneCount)) +
+  geom_bar(stat = "identity", fill = "#4CAF50", colour = "black", width = 0.8) +
+  geom_text(aes(label = GeneCount), vjust = -0.4, size = 4) +  # Adds labels above bars
   labs(
-    title = "Gene Distribution Across Phylostrata",
-    subtitle = paste("Total mapped genes:", nrow(phylostrata_df)),
+    title = "Phylostratum Distribution Across Murine Transcriptome",
     x = "Phylostratum",
     y = "Number of Genes"
   ) +
   theme_minimal(base_size = 14) +
   theme(
     plot.title = element_text(face = "bold", size = 16),
-    plot.subtitle = element_text(size = 12),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "none"
+    axis.text.x = element_text(angle = 45, hjust = 1)
   )
 ```
+
+
+
 
 ```{r}
 # Display the frequency of genes assigned to each phylostratum
@@ -1356,21 +1352,6 @@ cat("Saved full DE results list to de_results_list.rds\n")
 #A negative log2FC means higher expression in 24m (condition b)
 ```
 
-
-```{r}
-# Get versions of all loaded packages
-pkg_versions <- data.frame(
-  Package = loadedNamespaces(),
-  Version = sapply(loadedNamespaces(), function(pkg) as.character(packageVersion(pkg))),
-  stringsAsFactors = FALSE
-)
-
-# View it in console
-print(pkg_versions)
-
-# Save to CSV for documentation
-write.csv(pkg_versions, "R_package_versions.csv", row.names = FALSE)
-```
 
 
 
@@ -1768,28 +1749,6 @@ theme(
 
 
 
-```{r}
-# Load libraries
-library(ggplot2)
-library(patchwork)  # for safe panel layout
-
-# Step 1: Select tissues to panel
-panel_tissues <- c("Large_Intestine", "Thymus", "Spleen")
-
-# Step 2: Extract the plots from volcano_list
-panel_plots <- volcano_list[panel_tissues]
-
-# Step 3: Combine the plots using patchwork
-final_plot <- panel_plots[[1]] + panel_plots[[2]] + panel_plots[[3]] +
-  plot_layout(ncol = 3) +
-  plot_annotation(tag_levels = "A")  # Adds A, B, C tags
-
-# Step 4: Print to viewer (or save)
-print(final_plot)
-
-# Optional: Save to file
-ggsave("volcano_panel_plot.pdf", final_plot, width = 15, height = 5)
-```
 
 
 
@@ -1797,6 +1756,7 @@ ggsave("volcano_panel_plot.pdf", final_plot, width = 15, height = 5)
 
 
 ```{r}
+# CODE TO PRODUCE RENDERED VOLCANO PLOTS FOR 3 REPRESENTATIVE TISSUES (LARGE INTESTINE / THYMUS / SPLEEN)
 # Load libraries
 library(ggplot2)
 library(ggrepel)
@@ -1887,6 +1847,8 @@ ggsave("volcano_panels_stacked.pdf", final_plot, width = 7, height = 12)
 
 
 ```{r}
+# CODE TO PRODUCE RENDERED Barplots PLOTS FOR 3 REPRESENTATIVE TISSUES (LARGE INTESTINE / THYMUS / SPLEEN)
+
 library(ggplot2)
 library(patchwork)
 
@@ -1959,49 +1921,9 @@ ggsave("stacked_phylostrata_barplots.pdf", final_stack, width = 8, height = 12)
 
 
 
-```{r}
-# Get versions of all loaded packages
-pkg_versions <- data.frame(
-  Package = loadedNamespaces(),
-  Version = sapply(loadedNamespaces(), function(pkg) as.character(packageVersion(pkg))),
-  stringsAsFactors = FALSE
-)
-
-# View it in console
-print(pkg_versions)
-View(pkg_versions)
-```
+Part 6: GO Enrichment After Tissue-Wise DE Analysis
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-```{r}
-
-```
-
-
-
-Part 4: GO Enrichment After Tissue-Wise DE Analysis
 ```{r}
 #Conduct GO enrichment for 24m upregulated DEGs 
 
@@ -2066,6 +1988,8 @@ for (tis in names(de_results_list)) {
 
 
 ```{r}
+# CODE TO PRODUCE RENDERED DOT PLOTS PLOTS FOR 3 REPRESENTATIVE TISSUES (LARGE INTESTINE / THYMUS / SPLEEN)
+
 # Load required libraries
 library(clusterProfiler)
 library(org.Mm.eg.db)
@@ -2156,203 +2080,6 @@ if (all(selected_tissues %in% names(dotplot_list))) {
 ```
 
 
-```{r}
-#Identification of ALL Significant Age-Associated DEGs Annotated by Evolutionary Origin
 
-# Load DE results and phylostrata
-de_results_list <- readRDS("de_results_list.rds")
-phylostrata_df <- as.data.frame(combined_seurat[["RNA"]]@misc$Phylostrata)
-phylostrata_df$Gene <- rownames(phylostrata_df)
-
-# Initialise list
-combined_sig_de_list <- list()
-
-# Loop through each tissue
-for (tis in names(de_results_list)) {
-  
-  de_res <- de_results_list[[tis]]
-  if (is.null(de_res) || nrow(de_res) == 0) next
-  
-  # Add gene column
-  de_res$Gene <- rownames(de_res)
-  
-  # Filter for significant genes only
-  de_res_sig <- de_res %>%
-    filter(p_val_adj < 0.05) %>%
-    select(Gene, avg_log2FC, p_val_adj) %>%
-    mutate(Tissue = tis)
-  
-  # Add direction
-  de_res_sig <- de_res_sig %>%
-    mutate(direction = ifelse(avg_log2FC > 0, "Up in 3m", "Up in 24m"))
-  
-  # Merge phylostrata
-  de_merged <- left_join(de_res_sig, phylostrata_df, by = "Gene")
-  colnames(de_merged)[colnames(de_merged) == "Phylostrata"] <- "phylostrata"
-  
-  # Add to list
-  combined_sig_de_list[[tis]] <- de_merged
-}
-
-# Combine all into one dataframe
-combined_sig_de_all <- bind_rows(combined_sig_de_list)
-
-# View top rows
-head(combined_sig_de_all)
-
-# Save to CSV
-write.csv(combined_sig_de_all, "significant_DE_genes_all_tissues.csv", row.names = FALSE)
-```
-
-
-
-
-FIX THIS ONE!!! 
-
-
-```{r}
-# Load required libraries
-# Load required libraries
-library(clusterProfiler)
-library(org.Mm.eg.db)
-library(ggplot2)
-library(dplyr)
-library(enrichplot)
-library(tidyr)
-library(forcats)
-library(AnnotationDbi)
-
-# Function to map gene symbols to Entrez IDs and remove unmapped genes
-map_and_filter_genes <- function(genes) {
-  entrez_ids <- mapIds(org.Mm.eg.db, keys = genes, column = "ENTREZID", keytype = "SYMBOL", multiVals = "first")
-  filtered_genes <- na.omit(entrez_ids)
-  return(filtered_genes)
-}
-
-# Prepare phylostrata dataframe
-phylostrata_raw <- combined_seurat[["RNA"]]@misc$Phylostrata
-phylostrata_df <- if (is.null(dim(phylostrata_raw))) {
-  data.frame(gene = names(phylostrata_raw),
-             phylostratum = as.integer(phylostrata_raw),
-             stringsAsFactors = FALSE)
-} else {
-  data.frame(gene = rownames(phylostrata_raw),
-             phylostratum = as.integer(phylostrata_raw[, 1]),
-             stringsAsFactors = FALSE)
-}
-
-# Loop through tissues
-for (tis in names(de_results_list)) {
-  cat("Processing tissue:", tis, "\n")
-  
-  de_res <- de_results_list[[tis]]
-  if (is.null(de_res) || nrow(de_res) == 0) next
-  
-  # Get genes upregulated in 24m
-  genes_up_24m <- rownames(de_res %>% filter(avg_log2FC < 0, p_val_adj < 0.05))
-  if (length(genes_up_24m) < 5) {
-    cat("Too few genes for GO enrichment in", tis, "- skipping\n")
-    next
-  }
-  
-  # Map to Entrez IDs
-  entrez_genes <- map_and_filter_genes(genes_up_24m)
-  if (length(entrez_genes) < 5) {
-    cat("Too few mapped Entrez IDs for", tis, "- skipping\n")
-    next
-  }
-  
-  # GO enrichment for Biological Process
-  ego_bp <- enrichGO(
-    gene = entrez_genes,
-    OrgDb = org.Mm.eg.db,
-    ont = "BP",
-    pAdjustMethod = "BH",
-    qvalueCutoff = 0.05,
-    readable = TRUE
-  )
-  
-  if (is.null(ego_bp) || nrow(ego_bp) == 0) {
-    cat("No significant GO terms for", tis, "\n")
-    next
-  }
-  
-  # Parse geneID field (symbols, already readable)
-  gene2go <- setNames(ego_bp@result$geneID, ego_bp@result$ID)
-  
-  go_gene_df <- tibble(
-    GO = rep(names(gene2go), lengths(strsplit(gene2go, "/"))),
-    Symbol = unlist(strsplit(gene2go, "/"))
-  )
-  
-  # Join phylostrata annotation by SYMBOL
-  go_gene_df <- go_gene_df %>%
-    left_join(phylostrata_df, by = c("Symbol" = "gene"))
-  
-  # Summarise gene count per GO term and phylostratum
-  go_phylostratum_counts <- go_gene_df %>%
-    group_by(GO, phylostratum) %>%
-    summarise(count = n(), .groups = "drop")
-  
-  # Select top 10 GO terms for display
-  top_go_terms <- ego_bp@result %>%
-    arrange(p.adjust) %>%
-    slice_head(n = 10) %>%
-    pull(ID)
-  
-  plot_data <- go_phylostratum_counts %>%
-    filter(GO %in% top_go_terms) %>%
-    mutate(GO = factor(GO, levels = rev(top_go_terms)))
-  
-  # --- BARPLOT ---
-  p_bar <- ggplot(plot_data, aes(x = GO, y = count, fill = factor(phylostratum))) +
-    geom_col(position = position_stack()) +
-    coord_flip() +
-    labs(
-      title = paste("GO Biological Process Enrichment by Phylostrata in", tis),
-      x = "GO Term",
-      y = "Number of Genes",
-      fill = "Phylostratum"
-    ) +
-    theme_minimal(base_size = 12) +
-    theme(
-      plot.title = element_text(hjust = 0.5, face = "bold", margin = margin(b = 8))
-    )
-  print(p_bar)
-  
-  # --- DOTPLOT ---
-  gene_counts_per_go <- dplyr::filter(ego_bp@result, ID %in% top_go_terms) %>%
-  dplyr::select(ID, GeneRatio)
-  
-  gene_ratios <- sapply(gene_counts_per_go$GeneRatio, function(x) eval(parse(text = x)))
-  
-  plot_data <- plot_data %>%
-    left_join(gene_counts_per_go, by = c("GO" = "ID")) %>%
-    mutate(GeneRatioNum = gene_ratios[match(GO, gene_counts_per_go$ID)],
-           Ratio = count / (GeneRatioNum * 100))  # crude scaling
-  
-  plot_title <- paste("GO Enrichment Dotplot by Phylostrata in", tis)
-  
-  p_dot <- ggplot(plot_data, aes(x = GO, y = factor(phylostratum), size = count, color = Ratio)) +
-    geom_point() +
-    scale_color_gradient(low = "purple", high = "lightblue") +
-    labs(
-      title = plot_title,
-      x = "GO Term",
-      y = "Phylostratum",
-      color = "Gene Ratio",
-      size = "Gene Count"
-    ) +
-    theme_minimal(base_size = 12) +
-    theme(
-      legend.key.size = unit(0.4, "cm"),
-      legend.title = element_text(size = 9),
-      legend.text = element_text(size = 8),
-      plot.title = element_text(hjust = 0.5, face = "bold", size = 12, margin = margin(b = 8))
-    )
-  
-  print(p_dot)
-}
-```
 
 
