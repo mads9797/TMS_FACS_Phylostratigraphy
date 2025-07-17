@@ -1700,8 +1700,8 @@ for (tis in names(de_results_list)) {
   de_res <- de_results_list[[tis]]
   
   # Identify genes upregulated in 3m and 24m
-  up_in_3m <- rownames(de_res[de_res$avg_log2FC > 0 & de_res$p_val_adj < 0.05, ])
-  up_in_24m <- rownames(de_res[de_res$avg_log2FC < 0 & de_res$p_val_adj < 0.05, ])
+  up_in_3m <- rownames(de_res[de_res$avg_log2FC > 0.25 & de_res$p_val_adj < 0.05, ])
+  up_in_24m <- rownames(de_res[de_res$avg_log2FC < -0.25 & de_res$p_val_adj < 0.05, ])
   
   # Merge with Phylostrata and assign age group
   df_3m <- ps_data[ps_data$Gene %in% up_in_3m, , drop = FALSE]
@@ -1869,8 +1869,8 @@ for (tis in panel_tissues) {
   de_res <- de_results_list[[tis]]
   if (is.null(de_res)) next
   
-  up_in_3m <- rownames(de_res[de_res$avg_log2FC > 0 & de_res$p_val_adj < 0.05, ])
-  up_in_24m <- rownames(de_res[de_res$avg_log2FC < 0 & de_res$p_val_adj < 0.05, ])
+  up_in_3m <- rownames(de_res[de_res$avg_log2FC > 0.25 & de_res$p_val_adj < 0.05, ])
+  up_in_24m <- rownames(de_res[de_res$avg_log2FC < -0.25 & de_res$p_val_adj < 0.05, ])
   
   df_3m <- ps_data[ps_data$Gene %in% up_in_3m, , drop = FALSE]
   df_3m$Age <- "3m"
@@ -1946,7 +1946,7 @@ for (tis in names(de_results_list)) {
   
   # Select genes upregulated in 24m
   genes_up_24m <- de_res %>%
-    filter(avg_log2FC < 0, p_val_adj < 0.05) %>%
+    filter(avg_log2FC < -0.25, p_val_adj < 0.05) %>%
     rownames()
   
   # Map to Entrez IDs and filter out NAs
@@ -2022,7 +2022,7 @@ for (tis in selected_tissues) {
   
   # Get genes upregulated in 24-month mice
   genes_up_24m <- de_res %>%
-    filter(avg_log2FC < 0, p_val_adj < 0.05) %>%
+    filter(avg_log2FC < -0.25, p_val_adj < 0.05) %>%
     rownames()
   
   # Map to Entrez IDs
